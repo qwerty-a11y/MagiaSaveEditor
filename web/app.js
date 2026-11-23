@@ -248,6 +248,23 @@
     });
   }
 
+  // Only typed decimal integers may change a quantity. An empty number field
+  // can also mean the browser is still holding an incomplete token (e.g. "1e").
+  function readInteger(input, minimum, maximum) {
+    var field = typeof input === 'string' ? null : input;
+    var raw = (field ? field.value : input).trim();
+    if (minimum == null) { minimum = field && field.min ? Number(field.min) : 0; }
+    if (maximum == null) { maximum = field && field.max ? Number(field.max) : null; }
+    var value = Number(raw);
+    if ((field && field.validity && field.validity.badInput) || !/^[0-9]+$/.test(raw)
+        || !Number.isSafeInteger(value) || value < minimum || (maximum != null && value > maximum)) {
+      fail(new Error('请输入' + minimum + (maximum == null ? '或以上' : '至' + maximum) + '的整数'));
+      if (field) { field.focus(); }
+      return null;
+    }
+    return value;
+  }
+
   function bindNumberRows(root, handler) {
     root.querySelectorAll('[data-apply]').forEach(function (button) {
       button.addEventListener('click', function () {
@@ -446,12 +463,15 @@
           edit([textOp]);
           return;
         }
-        var value = Number(input.value);
-        if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+        var value = readInteger(input);
+        if (value === null) { return; }
         var op = JSON.parse(JSON.stringify(spec));
-        op[spec.valueKey] = Math.floor(value);
+        op[spec.valueKey] = value;
         var maxInput = row.querySelector('[data-max-field]');
-        if (maxInput && maxInput.value !== '') { op.maxPoint = Math.floor(Number(maxInput.value)); }
+        if (maxInput && (maxInput.value !== '' || maxInput.validity.badInput)) {
+          op.maxPoint = readInteger(maxInput);
+          if (op.maxPoint === null) { return; }
+        }
         edit([op]);
       });
       $('main').querySelectorAll('[data-preset]').forEach(function (button) {
@@ -800,8 +820,8 @@
       $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
         button.addEventListener('click', function () {
           var input = button.closest('.tile').querySelector('[data-qty]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'item.set', itemId: rows[index].itemId, quantity: value }]);
         });
       });
@@ -829,10 +849,10 @@
       },
       bind: function (host, rows) {
         host.querySelectorAll('[data-add]').forEach(function (button, index) {
-          button.addEventListener('click', function () {
+          button.addEventListener('click', function (event) {
             var input = button.closest('.tile').querySelector('[data-qty]');
-            var value = Math.floor(Number(input.value));
-            if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+            var value = readInteger(input);
+            if (value === null) { event.preventDefault(); return; }
             edit([{ op: 'item.add', itemId: rows[index].itemId, quantity: value }]);
           });
         });
@@ -867,9 +887,10 @@
       },
       bind: function (host, rows) {
         host.querySelectorAll('[data-add-chara]').forEach(function (button) {
-          button.addEventListener('click', function () {
+          button.addEventListener('click', function (event) {
             var tile = button.closest('.tile');
-            var level = Math.floor(Number(tile.querySelector('[data-lv]').value || 1));
+            var level = readInteger(tile.querySelector('[data-lv]'));
+            if (level === null) { event.preventDefault(); return; }
             edit([{ op: 'chara.add', charaId: Number(button.getAttribute('data-add-chara')), level: level }]);
           });
         });
@@ -1454,15 +1475,16 @@ function renderCharaDetail() {
       button.addEventListener('click', function () {
         var row = button.closest('[data-spec]');
         var spec = JSON.parse(row.getAttribute('data-spec'));
-        var raw = row.querySelector('[data-field]').value;
+        var input = row.querySelector('[data-field]');
+        var raw = input.value;
         var value;
         if (spec.field === 'enabled') {
           value = raw === '1';
         } else if (spec.field === 'live2dId') {
           value = raw;
         } else {
-          value = raw === '' ? null : Number(raw);
-          if (value === null || !isFinite(value)) { fail(new Error('请输入数字')); return; }
+          value = spec.field === 'level' ? readInteger(input, 1, card.maxLevel || null) : readInteger(input);
+          if (value === null) { return; }
         }
         var op = { op: spec.op, field: spec.field, value: value };
         if (spec.op === 'card.set') { op.id = spec.id; } else { op.userCardId = spec.userCardId; }
@@ -1707,7 +1729,8 @@ function renderCharaDetail() {
         bulk.addEventListener('click', function () {
           var value = window.prompt('把所有记忆结晶等级设为（超出上限按上限）', '30');
           if (value === null) { return; }
-          edit([{ op: 'piece.setAllLevels', level: Number(value) }]);
+          var level = readInteger(value, 1, 50);
+          if (level !== null) { edit([{ op: 'piece.setAllLevels', level: level }]); }
         });
       }
     });
@@ -1715,7 +1738,7 @@ function renderCharaDetail() {
 
   function pieceFieldHtml(label, field, value, editable, max) {
     return '<div class="fieldRow"><label>' + esc(label) + '</label>'
-      + '<input data-piece-field="' + esc(field) + '" type="number" min="0"'
+      + '<input data-piece-field="' + esc(field) + '" type="number" min="' + (field === 'level' ? 1 : 0) + '"'
       + (max === undefined ? '' : ' max="' + esc(max) + '"')
       + ' value="' + esc(value) + '"' + (editable ? '' : ' disabled') + '>'
       + '<button class="mini" data-piece-apply="' + esc(field) + '"' + (editable ? '' : ' disabled') + '>应用</button></div>';
@@ -1795,8 +1818,8 @@ function renderCharaDetail() {
         button.addEventListener('click', function () {
           var field = button.getAttribute('data-piece-apply');
           var input = $('main').querySelector('[data-piece-field="' + field + '"]');
-          var value = Number(input.value);
-          if (!isFinite(value)) { fail(new Error('请输入数字')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'piece.set', id: d.id, field: field, value: value }]);
         });
       });
@@ -2608,10 +2631,12 @@ function renderCharaDetail() {
             });
           }
           host.querySelectorAll('[data-add]').forEach(function (button, index) {
-            button.addEventListener('click', function () {
+            button.addEventListener('click', function (event) {
               var tileEl = button.closest('.tile');
-              var level = Math.floor(Number(tileEl.querySelector('[data-lv]').value || 1));
-              var lb = Math.floor(Number(tileEl.querySelector('[data-lb]').value || 0));
+              var level = readInteger(tileEl.querySelector('[data-lv]'));
+              if (level === null) { event.preventDefault(); return; }
+              var lb = readInteger(tileEl.querySelector('[data-lb]'));
+              if (lb === null) { event.preventDefault(); return; }
               edit([{ op: 'piece.add', pieceId: rows[index].pieceId, level: level, lbCount: lb }]);
             });
           });
@@ -3168,8 +3193,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-apply-ch]').forEach(function (button) {
         button.addEventListener('click', function () {
           var input = button.closest('tr').querySelector('[data-ch]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'challenge.set', table: button.getAttribute('data-apply-ch'),
             challengeId: Number(button.getAttribute('data-id')), clearedCount: value }]);
         });
@@ -3225,8 +3250,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-apply-gk]').forEach(function (button) {
         button.addEventListener('click', function () {
           var input = button.closest('tr').querySelector('[data-gk]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'gacha.set', field: 'totalCount', value: value,
             gachaKindId: Number(button.getAttribute('data-apply-gk')) }]);
         });
@@ -3234,8 +3259,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-apply-gg]').forEach(function (button) {
         button.addEventListener('click', function () {
           var input = button.closest('tr').querySelector('[data-gg]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'gacha.set', field: 'count', value: value,
             gachaGroupId: Number(button.getAttribute('data-apply-gg')) }]);
         });
@@ -3306,8 +3331,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
         button.addEventListener('click', function () {
           var input = button.closest('.tile').querySelector('[data-gift]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'gift.set', giftId: rows[index].giftId, quantity: value }]);
         });
       });
@@ -3335,10 +3360,10 @@ function renderSectionDetail() {
       },
       bind: function (host, rows) {
         host.querySelectorAll('[data-add]').forEach(function (button, index) {
-          button.addEventListener('click', function () {
+          button.addEventListener('click', function (event) {
             var input = button.closest('.tile').querySelector('[data-qty]');
-            var value = Math.floor(Number(input.value));
-            if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+            var value = readInteger(input);
+            if (value === null) { event.preventDefault(); return; }
             edit([{ op: 'gift.set', giftId: rows[index].giftId, quantity: value }]);
           });
         });
@@ -3429,7 +3454,7 @@ function renderSectionDetail() {
     // 选中条目后立即收起选择器（委托一次，picker 重开不会叠加监听）。
     $('modalBody').addEventListener('click', function (event) {
       var target = event.target;
-      if (target && target.closest && target.closest('[data-add], [data-add-chara]')) { closeModal(); }
+      if (!event.defaultPrevented && target && target.closest && target.closest('[data-add], [data-add-chara]')) { closeModal(); }
     });
 
     $('btnPick').addEventListener('click', function () {
