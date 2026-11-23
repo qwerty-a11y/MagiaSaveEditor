@@ -248,6 +248,23 @@
     });
   }
 
+  // Only typed decimal integers may change a quantity. An empty number field
+  // can also mean the browser is still holding an incomplete token (e.g. "1e").
+  function readInteger(input, minimum, maximum) {
+    var field = typeof input === 'string' ? null : input;
+    var raw = (field ? field.value : input).trim();
+    if (minimum == null) { minimum = field && field.min ? Number(field.min) : 0; }
+    if (maximum == null) { maximum = field && field.max ? Number(field.max) : null; }
+    var value = Number(raw);
+    if ((field && field.validity && field.validity.badInput) || !/^[0-9]+$/.test(raw)
+        || !Number.isSafeInteger(value) || value < minimum || (maximum != null && value > maximum)) {
+      fail(new Error('请输入' + minimum + (maximum == null ? '或以上' : '至' + maximum) + '的整数'));
+      if (field) { field.focus(); }
+      return null;
+    }
+    return value;
+  }
+
   function bindNumberRows(root, handler) {
     root.querySelectorAll('[data-apply]').forEach(function (button) {
       button.addEventListener('click', function () {
@@ -306,7 +323,7 @@
   // ------------------------------------------------------------ 概览
 
   function renderOverview() {
-    return api('/api/overview').then(function (data) {
+    return api('/api/overview?diff=0').then(function (data) {
       var player = data.player;
       var currency = data.currency;
       var counts = data.counts;
@@ -370,7 +387,7 @@
   // ------------------------------------------------------------ 资源与状态
 
   function renderResources() {
-    return Promise.all([api('/api/overview'), api('/api/view/status')]).then(function (results) {
+    return Promise.all([api('/api/overview?diff=0'), api('/api/view/status')]).then(function (results) {
       var data = results[0];
       var statusRows = results[1].rows;
       var currency = data.currency;
@@ -446,12 +463,15 @@
           edit([textOp]);
           return;
         }
-        var value = Number(input.value);
-        if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+        var value = readInteger(input);
+        if (value === null) { return; }
         var op = JSON.parse(JSON.stringify(spec));
-        op[spec.valueKey] = Math.floor(value);
+        op[spec.valueKey] = value;
         var maxInput = row.querySelector('[data-max-field]');
-        if (maxInput && maxInput.value !== '') { op.maxPoint = Math.floor(Number(maxInput.value)); }
+        if (maxInput && (maxInput.value !== '' || maxInput.validity.badInput)) {
+          op.maxPoint = readInteger(maxInput);
+          if (op.maxPoint === null) { return; }
+        }
         edit([op]);
       });
       $('main').querySelectorAll('[data-preset]').forEach(function (button) {
@@ -489,34 +509,78 @@
 
   // ------------------------------------------------------------ 页内选择器（模态框）
 
+  var pickerOpener = null, previewOpener = null, inertForDialog = [];
+  function topDialog() { return $('previewModal') || ($('modal').classList.contains('show') ? $('modal') : null); }
+  function syncDialogLayer() {
+    inertForDialog.forEach(function (node) { node.inert = false; });
+    inertForDialog = [];
+    var active = topDialog();
+    if (!active) { return; }
+    Array.prototype.forEach.call(document.body.children, function (node) {
+      if (node !== active && node.id !== 'toast' && node.tagName !== 'SCRIPT' && !node.inert && 'inert' in node) {
+        node.inert = true; inertForDialog.push(node);
+      }
+    });
+  }
+  function focusInView(node) {
+    if (node && node.isConnected && !node.disabled && node.getClientRects().length) {
+      node.focus({ preventScroll: true }); return document.activeElement === node;
+    }
+    return false;
+  }
+  function dialogKeys(event) {
+    var layer = topDialog(); if (!layer || event.isComposing || event.keyCode === 229) { return; }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (layer.id === 'previewModal') { closePreview(); } else { closeModal(); }
+    } else if (event.key === 'Tab') {
+      var nodes = layer.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex]');
+      var first = null, last = null, i;
+      for (i = 0; i < nodes.length; i++) {
+        if (nodes[i].tabIndex >= 0 && nodes[i].getClientRects().length) { first = nodes[i]; break; }
+      }
+      for (i = nodes.length - 1; i >= 0; i--) {
+        if (nodes[i].tabIndex >= 0 && nodes[i].getClientRects().length) { last = nodes[i]; break; }
+      }
+      if (first && (!layer.contains(document.activeElement) || (event.shiftKey ? document.activeElement === first : document.activeElement === last))) {
+        event.preventDefault(); (event.shiftKey ? last : first).focus();
+      }
+    }
+  }
+
   function closeModal() {
     var host = $('modal');
+    if (!host.classList.contains('show')) { return; }
     host.classList.remove('show');
+    syncDialogLayer();
+    if (!focusInView(pickerOpener)) { focusInView(document.querySelector('#tabs .active')); }
+    pickerOpener = null;
     host.setAttribute('aria-hidden', 'true');
     $('modalSearch').oninput = null;
   }
 
-  function openModal(title, placeholder) {
+  function openModal(title, placeholder, searchable) {
     var host = $('modal');
+    if (!host.classList.contains('show')) { pickerOpener = document.activeElement; }
+    host.classList.toggle('picker-searchable', searchable);
+    host.querySelector('[role="dialog"]').setAttribute('aria-labelledby', 'modalTitle');
     $('modalTitle').textContent = title;
     var input = $('modalSearch');
-    input.classList.remove('hidden');
+    input.classList.toggle('hidden', !searchable);
     input.value = '';
     input.placeholder = placeholder || '搜索名称或 ID';
     $('modalMeta').textContent = '';
     $('modalBody').innerHTML = '<div class="empty">加载中…</div>';
     host.classList.add('show');
     host.setAttribute('aria-hidden', 'false');
-    input.focus();
+    syncDialogLayer();
+    focusInView(searchable ? input : $('modalClose'));
     return host;
   }
 
   /* config: { title, placeholder, load(q), meta(data), render(rows), bind(host, rows) } */
   function openPicker(config) {
-    openModal(config.title, config.placeholder);
-    if (config.search === false) {
-      $('modalSearch').classList.add('hidden');
-    }
+    openModal(config.title, config.placeholder, config.search !== false);
     function load(query) {
       $('modalBody').innerHTML = '<div class="empty">加载中…</div>';
       config.load(query).then(function (data) {
@@ -756,8 +820,8 @@
       $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
         button.addEventListener('click', function () {
           var input = button.closest('.tile').querySelector('[data-qty]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'item.set', itemId: rows[index].itemId, quantity: value }]);
         });
       });
@@ -785,10 +849,10 @@
       },
       bind: function (host, rows) {
         host.querySelectorAll('[data-add]').forEach(function (button, index) {
-          button.addEventListener('click', function () {
+          button.addEventListener('click', function (event) {
             var input = button.closest('.tile').querySelector('[data-qty]');
-            var value = Math.floor(Number(input.value));
-            if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+            var value = readInteger(input);
+            if (value === null) { event.preventDefault(); return; }
             edit([{ op: 'item.add', itemId: rows[index].itemId, quantity: value }]);
           });
         });
@@ -823,9 +887,10 @@
       },
       bind: function (host, rows) {
         host.querySelectorAll('[data-add-chara]').forEach(function (button) {
-          button.addEventListener('click', function () {
+          button.addEventListener('click', function (event) {
             var tile = button.closest('.tile');
-            var level = Math.floor(Number(tile.querySelector('[data-lv]').value || 1));
+            var level = readInteger(tile.querySelector('[data-lv]'));
+            if (level === null) { event.preventDefault(); return; }
             edit([{ op: 'chara.add', charaId: Number(button.getAttribute('data-add-chara')), level: level }]);
           });
         });
@@ -1410,15 +1475,16 @@ function renderCharaDetail() {
       button.addEventListener('click', function () {
         var row = button.closest('[data-spec]');
         var spec = JSON.parse(row.getAttribute('data-spec'));
-        var raw = row.querySelector('[data-field]').value;
+        var input = row.querySelector('[data-field]');
+        var raw = input.value;
         var value;
         if (spec.field === 'enabled') {
           value = raw === '1';
         } else if (spec.field === 'live2dId') {
           value = raw;
         } else {
-          value = raw === '' ? null : Number(raw);
-          if (value === null || !isFinite(value)) { fail(new Error('请输入数字')); return; }
+          value = spec.field === 'level' ? readInteger(input, 1, card.maxLevel || null) : readInteger(input);
+          if (value === null) { return; }
         }
         var op = { op: spec.op, field: spec.field, value: value };
         if (spec.op === 'card.set') { op.id = spec.id; } else { op.userCardId = spec.userCardId; }
@@ -1663,7 +1729,8 @@ function renderCharaDetail() {
         bulk.addEventListener('click', function () {
           var value = window.prompt('把所有记忆结晶等级设为（超出上限按上限）', '30');
           if (value === null) { return; }
-          edit([{ op: 'piece.setAllLevels', level: Number(value) }]);
+          var level = readInteger(value, 1, 50);
+          if (level !== null) { edit([{ op: 'piece.setAllLevels', level: level }]); }
         });
       }
     });
@@ -1671,7 +1738,7 @@ function renderCharaDetail() {
 
   function pieceFieldHtml(label, field, value, editable, max) {
     return '<div class="fieldRow"><label>' + esc(label) + '</label>'
-      + '<input data-piece-field="' + esc(field) + '" type="number" min="0"'
+      + '<input data-piece-field="' + esc(field) + '" type="number" min="' + (field === 'level' ? 1 : 0) + '"'
       + (max === undefined ? '' : ' max="' + esc(max) + '"')
       + ' value="' + esc(value) + '"' + (editable ? '' : ' disabled') + '>'
       + '<button class="mini" data-piece-apply="' + esc(field) + '"' + (editable ? '' : ' disabled') + '>应用</button></div>';
@@ -1751,8 +1818,8 @@ function renderCharaDetail() {
         button.addEventListener('click', function () {
           var field = button.getAttribute('data-piece-apply');
           var input = $('main').querySelector('[data-piece-field="' + field + '"]');
-          var value = Number(input.value);
-          if (!isFinite(value)) { fail(new Error('请输入数字')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'piece.set', id: d.id, field: field, value: value }]);
         });
       });
@@ -2423,19 +2490,25 @@ function renderCharaDetail() {
 
   function closePreview() {
     var node = document.getElementById('previewModal');
-    if (node) { node.parentNode.removeChild(node); }
+    if (node) {
+      node.parentNode.removeChild(node); syncDialogLayer();
+      if (!focusInView(previewOpener)) { focusInView($('modalClose')); }
+      previewOpener = null;
+    }
   }
 
-  function openPreview(title, html) {
+  function openPreview(title, html, trigger) {
     closePreview();
+    previewOpener = trigger || document.activeElement;
     var host = document.createElement('div');
     host.id = 'previewModal';
     host.className = 'modal show';
-    host.innerHTML = '<div class="panel" role="dialog" aria-modal="true">'
-      + '<div class="head"><strong>' + esc(title) + '</strong><span class="spacer"></span>'
+    host.innerHTML = '<div class="panel" role="dialog" aria-modal="true" aria-labelledby="piecePreviewTitle">'
+      + '<div class="head"><strong id="piecePreviewTitle">' + esc(title) + '</strong><span class="spacer"></span>'
       + '<button class="ghost mini" data-preview-close>关闭</button></div>'
       + '<div class="body">' + html + '</div></div>';
-    document.body.appendChild(host);
+    document.body.appendChild(host); syncDialogLayer();
+    focusInView(host.querySelector('[data-preview-close]'));
     host.addEventListener('click', function (event) {
       if (event.target === host) { closePreview(); }
       else if (event.target.closest('[data-preview-close]')) { closePreview(); }
@@ -2558,10 +2631,12 @@ function renderCharaDetail() {
             });
           }
           host.querySelectorAll('[data-add]').forEach(function (button, index) {
-            button.addEventListener('click', function () {
+            button.addEventListener('click', function (event) {
               var tileEl = button.closest('.tile');
-              var level = Math.floor(Number(tileEl.querySelector('[data-lv]').value || 1));
-              var lb = Math.floor(Number(tileEl.querySelector('[data-lb]').value || 0));
+              var level = readInteger(tileEl.querySelector('[data-lv]'));
+              if (level === null) { event.preventDefault(); return; }
+              var lb = readInteger(tileEl.querySelector('[data-lb]'));
+              if (lb === null) { event.preventDefault(); return; }
               edit([{ op: 'piece.add', pieceId: rows[index].pieceId, level: level, lbCount: lb }]);
             });
           });
@@ -2569,7 +2644,9 @@ function renderCharaDetail() {
             button.addEventListener('click', function () {
               api('/api/view/piece-master?pieceId=' + encodeURIComponent(button.getAttribute('data-preview')))
                 .then(function (detail) {
-                  openPreview(detail.name || ('结晶 ' + detail.pieceId), piecePreviewHtml(detail));
+                  if (button.isConnected && $('modal').classList.contains('show')) {
+                    openPreview(detail.name || ('结晶 ' + detail.pieceId), piecePreviewHtml(detail), button);
+                  }
                 }).catch(fail);
             });
           });
@@ -3116,8 +3193,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-apply-ch]').forEach(function (button) {
         button.addEventListener('click', function () {
           var input = button.closest('tr').querySelector('[data-ch]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'challenge.set', table: button.getAttribute('data-apply-ch'),
             challengeId: Number(button.getAttribute('data-id')), clearedCount: value }]);
         });
@@ -3173,8 +3250,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-apply-gk]').forEach(function (button) {
         button.addEventListener('click', function () {
           var input = button.closest('tr').querySelector('[data-gk]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'gacha.set', field: 'totalCount', value: value,
             gachaKindId: Number(button.getAttribute('data-apply-gk')) }]);
         });
@@ -3182,8 +3259,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-apply-gg]').forEach(function (button) {
         button.addEventListener('click', function () {
           var input = button.closest('tr').querySelector('[data-gg]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'gacha.set', field: 'count', value: value,
             gachaGroupId: Number(button.getAttribute('data-apply-gg')) }]);
         });
@@ -3254,8 +3331,8 @@ function renderSectionDetail() {
       $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
         button.addEventListener('click', function () {
           var input = button.closest('.tile').querySelector('[data-gift]');
-          var value = Math.floor(Number(input.value));
-          if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+          var value = readInteger(input);
+          if (value === null) { return; }
           edit([{ op: 'gift.set', giftId: rows[index].giftId, quantity: value }]);
         });
       });
@@ -3283,10 +3360,10 @@ function renderSectionDetail() {
       },
       bind: function (host, rows) {
         host.querySelectorAll('[data-add]').forEach(function (button, index) {
-          button.addEventListener('click', function () {
+          button.addEventListener('click', function (event) {
             var input = button.closest('.tile').querySelector('[data-qty]');
-            var value = Math.floor(Number(input.value));
-            if (!isFinite(value) || value < 0) { fail(new Error('请输入非负整数')); return; }
+            var value = readInteger(input);
+            if (value === null) { event.preventDefault(); return; }
             edit([{ op: 'gift.set', giftId: rows[index].giftId, quantity: value }]);
           });
         });
@@ -3331,22 +3408,28 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 打开 / 保存
 
   function openArchive(path) {
-    return api('/api/open', { path: path }).then(function (payload) {
-      S.page = {};
-      toast('已打开 ' + payload.summary.label, 'ok');
-      return refreshStatus().then(function () { renderTabs(); render(); });
+    return api('/api/status').then(function (status) {
+      if (status.dirty && !window.confirm('当前存档「' + status.summary.label + '」有未保存的改动。放弃改动并打开所选存档？')) { return; }
+      return api('/api/open', { path: path }).then(function (payload) {
+        S.page = {};
+        toast('已打开 ' + payload.summary.label, 'ok');
+        return refreshStatus().then(function () { renderTabs(); render(); });
+      });
     }).catch(fail);
   }
 
   function saveAs() {
     var summary = (S.status && S.status.summary) || null;
-    var stem = summary ? String(summary.path).replace(/^.*[\/]/, '').replace(/\.zip$/i, '') : 'magia-save';
+    if (!summary) { toast('请先打开一份存档', 'err'); return; }
+    var stem = String(summary.path).split(/[\\/]/).pop().replace(/\.zip$/i, '') || 'magia-save';
     var suggestion = stem + '-edited-' + Date.now() + '.zip';
-    api('/api/pick', { mode: 'save', initial: summary ? summary.path : '', suggest: suggestion })
-      .then(function (payload) { return payload.path; })
-      .catch(function () { return null; })
+    function manualPath() { return window.prompt('另存为（不会覆盖原存档）', suggestion); }
+    api('/api/pick', { mode: 'save', initial: summary.path, suggest: suggestion })
+      .then(function (payload) {
+        if (payload.path) { return payload.path; }
+        return payload.available === false ? manualPath() : null;
+      }, manualPath)
       .then(function (path) {
-        if (!path) { path = window.prompt('另存为（不会覆盖原存档）', suggestion); }
         if (!path) { return null; }
         var label = window.prompt('存档标签（≤80 字符）', summary ? summary.label : 'edited');
         if (label === null) { return null; }
@@ -3367,15 +3450,11 @@ function renderSectionDetail() {
     $('modal').addEventListener('click', function (event) {
       if (event.target === $('modal')) { closeModal(); }
     });
-    document.addEventListener('keydown', function (event) {
-      if (event.key !== 'Escape') { return; }
-      if (document.getElementById('previewModal')) { closePreview(); return; }
-      if ($('modal').classList.contains('show')) { closeModal(); }
-    });
+    document.addEventListener('keydown', dialogKeys);
     // 选中条目后立即收起选择器（委托一次，picker 重开不会叠加监听）。
     $('modalBody').addEventListener('click', function (event) {
       var target = event.target;
-      if (target && target.closest && target.closest('[data-add], [data-add-chara]')) { closeModal(); }
+      if (!event.defaultPrevented && target && target.closest && target.closest('[data-add], [data-add-chara]')) { closeModal(); }
     });
 
     $('btnPick').addEventListener('click', function () {
@@ -3391,11 +3470,11 @@ function renderSectionDetail() {
     });
     $('btnSave').addEventListener('click', saveAs);
     $('btnUndo').addEventListener('click', function () {
-      api('/api/undo').then(function () { toast('已撤销一步', 'ok'); return refreshStatus().then(render); }).catch(fail);
+      api('/api/undo', {}).then(function () { toast('已撤销一步', 'ok'); return refreshStatus().then(render); }).catch(fail);
     });
     $('btnDiscard').addEventListener('click', function () {
       if (!window.confirm('丢弃全部未保存改动？')) { return; }
-      api('/api/discard').then(function () {
+      api('/api/discard', {}).then(function () {
         toast('已回到磁盘上的存档状态', 'ok');
         return refreshStatus().then(render);
       }).catch(fail);
@@ -3408,8 +3487,6 @@ function renderSectionDetail() {
       if (status.loaded) {
         $('openPath').value = status.archive || '';
         applyHash();
-      } else {
-        $('openPath').value = 'H:/magia_server/magia-save-chino-1794718180238.zip';
       }
     }).catch(fail);
   }
