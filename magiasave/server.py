@@ -124,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/status":
                 return self._json(self.api_status())
             if path == "/api/overview":
-                return self._json(self.api_overview())
+                return self._json(self.api_overview(include_diff=query.get("diff") != "0"))
             if path.startswith("/api/view/"):
                 return self._json(self.api_view(path[len("/api/view/"):], query))
             if path == "/api/chara":
@@ -212,13 +212,14 @@ class Handler(BaseHTTPRequestHandler):
                 "catalog": session.catalog.stats(),
             }
 
-    def api_overview(self):
+    def api_overview(self, include_diff=True):
         with self.session.lock:
             editor = self.session.require()
             data = editor.overview()
             data["ok"] = True
             data["dirty"] = editor.dirty
-            data["diff"] = editor.diff_summary()
+            if include_diff:
+                data["diff"] = editor.diff_summary()
             return data
 
     def api_view(self, name, query):

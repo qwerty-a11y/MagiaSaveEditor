@@ -323,7 +323,7 @@
   // ------------------------------------------------------------ 概览
 
   function renderOverview() {
-    return api('/api/overview').then(function (data) {
+    return api('/api/overview?diff=0').then(function (data) {
       var player = data.player;
       var currency = data.currency;
       var counts = data.counts;
@@ -387,7 +387,7 @@
   // ------------------------------------------------------------ 资源与状态
 
   function renderResources() {
-    return Promise.all([api('/api/overview'), api('/api/view/status')]).then(function (results) {
+    return Promise.all([api('/api/overview?diff=0'), api('/api/view/status')]).then(function (results) {
       var data = results[0];
       var statusRows = results[1].rows;
       var currency = data.currency;
