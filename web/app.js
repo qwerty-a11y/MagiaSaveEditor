@@ -182,19 +182,30 @@
     return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
   }
 
-  function restoreScroll() {
+  function restoreScroll(epoch) {
     var y = SCROLL.key === viewKey() ? SCROLL.y : 0;
     window.scrollTo(0, y);
     SCROLL.ready = true;
     if (!y) { return; }
     // 内容高度在下一帧才稳定（图片 / SVG 布局），再校一次。
     window.requestAnimationFrame(function () {
+      if (epoch !== renderEpoch) { return; }
       var max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
       window.scrollTo(0, Math.min(y, Math.max(0, max - window.innerHeight)));
     });
   }
 
+  // Only the latest navigation may paint. Let older reads finish without touching the visible form.
+  var renderEpoch = 0;
+  function paintCurrent(promise, draw) {
+    var epoch = renderEpoch;
+    return promise.then(function (value) {
+      if (epoch === renderEpoch) { return draw(value); }
+    });
+  }
+
   function render() {
+    var epoch = ++renderEpoch;
     if (!S.status || !S.status.loaded) {
       $('main').innerHTML = '<div class="empty" id="emptyHint">请先打开一个存档 zip。</div>';
       return;
@@ -224,10 +235,11 @@
       default: task = Promise.resolve();
     }
     return task.then(function () {
-      restoreScroll();
+      if (epoch === renderEpoch) { restoreScroll(epoch); }
     }, function (error) {
+      if (epoch !== renderEpoch) { return; }
       host.innerHTML = '<div class="empty">加载失败：' + esc(error.message) + '</div>';
-      restoreScroll();
+      restoreScroll(epoch);
     });
   }
 
@@ -323,7 +335,7 @@
   // ------------------------------------------------------------ 概览
 
   function renderOverview() {
-    return api('/api/overview?diff=0').then(function (data) {
+    return paintCurrent(api('/api/overview?diff=0'), function (data) {
       var player = data.player;
       var currency = data.currency;
       var counts = data.counts;
@@ -387,7 +399,7 @@
   // ------------------------------------------------------------ 资源与状态
 
   function renderResources() {
-    return Promise.all([api('/api/overview?diff=0'), api('/api/view/status')]).then(function (results) {
+    return paintCurrent(Promise.all([api('/api/overview?diff=0'), api('/api/view/status')]), function (results) {
       var data = results[0];
       var statusRows = results[1].rows;
       var currency = data.currency;
@@ -548,9 +560,15 @@
     }
   }
 
+  var cancelPickerRead = null;
+  function resetPickerRead() {
+    if (cancelPickerRead) { cancelPickerRead(); cancelPickerRead = null; }
+  }
+
   function closeModal() {
     var host = $('modal');
     if (!host.classList.contains('show')) { return; }
+    resetPickerRead();
     host.classList.remove('show');
     syncDialogLayer();
     if (!focusInView(pickerOpener)) { focusInView(document.querySelector('#tabs .active')); }
@@ -580,30 +598,63 @@
 
   /* config: { title, placeholder, load(q), meta(data), render(rows), bind(host, rows) } */
   function openPicker(config) {
+    resetPickerRead();
     openModal(config.title, config.placeholder, config.search !== false);
-    function load(query) {
+    var generation = 0, timer = null, active = true, offset = 0, focusPage = false;
+    cancelPickerRead = function () {
+      active = false;
+      clearTimeout(timer);
+      $('modalBody')._reload = null;
+    };
+    function search(delay) {
+      if (!active) { return; }
+      var request = ++generation, query = $('modalSearch').value.trim();
+      clearTimeout(timer);
+      // A changed query invalidates the old Add buttons even during debounce.
+      $('modalMeta').textContent = '';
       $('modalBody').innerHTML = '<div class="empty">加载中…</div>';
-      config.load(query).then(function (data) {
+      if (delay) { timer = setTimeout(function () { load(query, request); }, delay); }
+      else { load(query, request); }
+    }
+    function current(request) { return active && request === generation; }
+    function load(query, request) {
+      if (!current(request)) { return; }
+      config.load(query, offset, config.pageSize).then(function (data) {
+        if (!current(request)) { return; }
         $('modalMeta').textContent = config.meta ? config.meta(data) : '';
         var rows = (data && data.rows) || [];
-        if (!rows.length) {
+        if (!rows.length && !config.renderEmpty) {
           $('modalBody').innerHTML = '<div class="empty">没有匹配项</div>';
           return;
         }
         $('modalBody').innerHTML = config.render(rows, data);
+        if (config.pageSize && data.total > config.pageSize) {
+          var pages = Math.ceil(data.total / config.pageSize), options = '';
+          for (var p = 0; p < pages; p++) {
+            var start = p * config.pageSize;
+            options += '<option value="' + start + '"' + (start === data.offset ? ' selected' : '')
+              + '>第 ' + (p + 1) + ' / ' + pages + ' 页</option>';
+          }
+          var body = $('modalBody');
+          body.insertAdjacentHTML('afterbegin', '<div class="toolbar"><label>页码 <select data-roster-page>'
+            + options + '</select></label></div>');
+          var page = body.querySelector('[data-roster-page]');
+          if (focusPage) { body.scrollTop = 0; page.focus(); focusPage = false; }
+          page.addEventListener('change', function () {
+            offset = Number(page.value); focusPage = true; search(0);
+          });
+        }
         if (config.bind) { config.bind($('modalBody'), rows, data); }
       }).catch(function (error) {
+        if (!current(request)) { return; }
         $('modalBody').innerHTML = '<div class="empty">加载失败：' + esc(error.message) + '</div>';
       });
     }
-    var timer = null;
-    $('modalSearch').oninput = function () {
-      if (timer) { clearTimeout(timer); }
-      timer = setTimeout(function () { load($('modalSearch').value.trim()); }, 240);
-    };
-    load('');
-    // 弹窗内部的筛选控件靠这个重新拉数据（不关闭弹窗）
-    $('modalBody')._reload = function () { load($('modalSearch').value.trim()); };
+    // Search and filter changes start a new result set; a page choice alone keeps the offset.
+    function restart(delay) { offset = 0; focusPage = false; search(delay); }
+    $('modalSearch').oninput = function () { restart(240); };
+    $('modalBody')._reload = function () { restart(0); };
+    search(0);
   }
 
   function tileHtml(icon, name, idText, bodyHtml, tagsHtml) {
@@ -670,7 +721,7 @@
 
   function renderItemFamilies() {
     var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
-    return api('/api/view/items-families?scope=' + scope).then(function (data) {
+    return paintCurrent(api('/api/view/items-families?scope=' + scope), function (data) {
       var html = '<div class="toolbar">' + itemCrumb()
         + '<input type="text" data-global-search placeholder="全局搜索道具（名称 / itemId），回车确认">'
         + '<select data-scope><option value="player">玩家可见道具</option>'
@@ -725,8 +776,8 @@
 
   function renderItemGroups(family) {
     var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
-    return api('/api/view/items-groups?family=' + encodeURIComponent(family)
-      + '&scope=' + scope).then(function (data) {
+    return paintCurrent(api('/api/view/items-groups?family=' + encodeURIComponent(family)
+      + '&scope=' + scope), function (data) {
       var html = '<div class="toolbar">' + itemCrumb()
         + '<input type="text" data-filter placeholder="过滤活动名">'
         + '<span class="spacer"></span><span class="small">' + data.total + ' 组活动</span></div>';
@@ -773,7 +824,7 @@
       + (group ? '&group=' + encodeURIComponent(group) : '')
       + '&offset=' + page.offset
       + '&limit=' + limit + '&sort=' + sort + '&q=' + encodeURIComponent(page.q || '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var owned = data.rows.filter(function (row) { return row.owned; }).length;
       var html = '<div class="toolbar">' + itemCrumb()
         + (searching ? '<span class="small">搜索「' + esc(S.itemsNav.search) + '」</span>'
@@ -865,8 +916,11 @@
   function openCharaPicker() {
     openPicker({
       title: '添加魔法少女',
-      placeholder: '搜索角色名称（已实装 231 名）',
-      load: function (q) { return api('/api/view/chara-catalog?limit=120&q=' + encodeURIComponent(q)); },
+      placeholder: '搜索已实装角色的名称或编号',
+      pageSize: 120,
+      load: function (q, offset, limit) {
+        return api('/api/view/chara-catalog?limit=' + limit + '&offset=' + offset + '&q=' + encodeURIComponent(q));
+      },
       meta: function (data) { return '匹配 ' + data.total + ' 名'; },
       render: function (rows) {
         var html = '<div class="grid wide">';
@@ -904,7 +958,7 @@
     var page = pageOf(tabId);
     var limit = 120;
     var url = '/api/view/charas?offset=' + page.offset + '&limit=' + limit + '&q=' + encodeURIComponent(page.q || '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索角色名称或卡片名">'
         + '<button data-add-chara>添加魔法少女…</button>'
         + '<span class="spacer"></span><span class="small">共 ' + data.total
@@ -1400,7 +1454,7 @@ if (panel === 'magia') {
 
 function renderCharaDetail() {
     var panel = S.charaPanel;
-    return api('/api/chara?userCardId=' + encodeURIComponent(S.charaSel)).then(function (d) {
+    return paintCurrent(api('/api/chara?userCardId=' + encodeURIComponent(S.charaSel)), function (d) {
       var extra = null;
       if (panel === 'attribute') {
         extra = api('/api/view/attribute?charaId=' + encodeURIComponent(d.charaId)).then(function (data) {
@@ -1411,7 +1465,7 @@ function renderCharaDetail() {
           d.awakening = data;
         });
       }
-      return (extra || Promise.resolve()).then(function () { paintCharaDetail(d, panel); });
+      return paintCurrent(extra || Promise.resolve(), function () { paintCharaDetail(d, panel); });
     });
   }
 
@@ -1626,6 +1680,26 @@ function renderCharaDetail() {
     return '<span class="tag">' + esc(slot.name) + ' · 第' + esc(slot.member) + '位 · 槽' + esc(slot.slot) + '</span>';
   }
 
+  // The inventory and the Add dialog show the same archive's owned characters.
+  function pieceFilterCharacters() {
+    var rows = [], seen = new Set(), limit = 200;
+    function read(offset) {
+      return api('/api/view/charas?limit=' + limit + '&offset=' + offset).then(function (data) {
+        var page = data.rows || [];
+        page.forEach(function (row) {
+          if (!seen.has(row.charaId)) {
+            seen.add(row.charaId);
+            rows.push({ charaId: row.charaId, name: row.name });
+          }
+        });
+        var next = offset + page.length;
+        if (page.length && next < data.total) { return read(next); }
+        return { rows: rows, partial: next < data.total };
+      }).catch(function () { return { rows: rows, partial: true }; });
+    }
+    return read(0);
+  }
+
   function renderPieces() {
     if (S.pieceSel) { return renderPieceDetail(); }
     var tabId = 'pieces';
@@ -1641,8 +1715,8 @@ function renderCharaDetail() {
       + '&sort=' + encodeURIComponent(filter.sort || '')
       + '&order=' + encodeURIComponent(filter.order || 'desc')
       + '&keyword=' + encodeURIComponent(filter.keyword || '');
-    var charaPromise = api('/api/view/charas?limit=200').catch(function () { return { rows: [] }; });
-    return Promise.all([api(url), charaPromise]).then(function (results) {
+    var charaPromise = pieceFilterCharacters();
+    return paintCurrent(Promise.all([api(url), charaPromise]), function (results) {
       var data = results[0];
       var charaRows = (results[1] && results[1].rows) || [];
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索结晶名称或 pieceId">'
@@ -1664,6 +1738,7 @@ function renderCharaDetail() {
         + pieceOrderSelect(filter.order)
         + '<input type="text" data-keyword-filter placeholder="技能关键词" value="'
         + esc(filter.keyword || '') + '">'
+        + (results[1].partial ? '<span class="small">角色列表未完整载入</span>' : '')
         + '<button data-add>添加记忆结晶…</button>'
         + '<button data-all-piece>全部等级设为…</button><span class="spacer"></span>'
         + '<span class="small">共 ' + data.total + ' 枚（同种可有多枚）· 点卡片看详情</span></div>';
@@ -1757,7 +1832,7 @@ function renderCharaDetail() {
           render();
         });
       });
-      $('main').querySelector('[data-add]').addEventListener('click', openPiecePicker);
+      $('main').querySelector('[data-add]').addEventListener('click', function () { openPiecePicker(results[1]); });
       var bulk = $('main').querySelector('[data-all-piece]');
       if (bulk) {
         bulk.addEventListener('click', function () {
@@ -1779,7 +1854,7 @@ function renderCharaDetail() {
   }
 
   function renderPieceDetail() {
-    return api('/api/view/piece?id=' + encodeURIComponent(S.pieceSel)).then(function (d) {
+    return paintCurrent(api('/api/view/piece?id=' + encodeURIComponent(S.pieceSel)), function (d) {
       var html = '<div class="crumbs"><button class="mini" data-piece-back>记忆结晶一览</button>'
         + '<span>›</span><span class="small">' + esc(d.name) + '</span></div>';
       html += '<section class="panel charaHead">' + thumb(d.icon, d.name, 'charaFace')
@@ -2026,7 +2101,7 @@ function renderCharaDetail() {
 
   function renderDecks() {
     if (S.deckSel) { return renderDeckDetail(); }
-    return api('/api/view/decks').then(function (data) {
+    return paintCurrent(api('/api/view/decks'), function (data) {
       var questDecks = (data.decks || []).filter(function (deck) { return deck.kind === 'quest'; });
       var others = (data.decks || []).filter(function (deck) { return deck.kind !== 'quest'; });
       var html = '<div class="toolbar"><span class="small">任务编队 ' + questDecks.length + ' 个</span>'
@@ -2079,7 +2154,7 @@ function renderCharaDetail() {
   };
 
   function renderDeckDetail() {
-    return api('/api/view/decks').then(function (data) {
+    return paintCurrent(api('/api/view/decks'), function (data) {
       var deck = (data.decks || []).filter(function (item) {
         return String(item.deckType) === String(S.deckSel);
       })[0];
@@ -2455,7 +2530,10 @@ function renderCharaDetail() {
     openPicker({
       title: '选择上阵角色（第 ' + slot + ' 位）',
       placeholder: '搜索角色或卡名',
-      load: function (q) { return api('/api/view/charas?limit=200&q=' + encodeURIComponent(q)); },
+      pageSize: 200,
+      load: function (q, offset, limit) {
+        return api('/api/view/charas?limit=' + limit + '&offset=' + offset + '&q=' + encodeURIComponent(q));
+      },
       meta: function (data) { return '已拥有 ' + data.total + ' 名'; },
       render: function (rows) {
         var html = '<div class="grid wide">';
@@ -2485,8 +2563,10 @@ function renderCharaDetail() {
     openPicker({
       title: '给第 ' + member + ' 位（槽 ' + slot + '）选择记忆结晶',
       placeholder: '搜索结晶名称',
-      load: function (q) {
-        return api('/api/view/pieces?limit=200&q=' + encodeURIComponent(q)
+      pageSize: 200,
+      renderEmpty: true,
+      load: function (q, offset, limit) {
+        return api('/api/view/pieces?limit=' + limit + '&offset=' + offset + '&q=' + encodeURIComponent(q)
           + '&rank=' + encodeURIComponent(filter.rank)
           + '&type=' + encodeURIComponent(filter.type)
           + '&limitMode=' + encodeURIComponent(filter.limit)
@@ -2513,8 +2593,9 @@ function renderCharaDetail() {
           + '</select>'
           + pieceSortSelect(filter.sort)
           + pieceOrderSelect(filter.order)
-          + '<span class="small">' + rows.length + ' 枚</span></div>'
-          + '<div class="grid wide">';
+          + '<span class="small">本页 ' + rows.length + ' 枚</span></div>';
+        if (!rows.length) { return html + '<div class="empty">没有匹配项</div>'; }
+        html += '<div class="grid wide">';
         rows.forEach(function (row) {
           html += '<div class="tile">' + thumb(row.icon, row.name, 'icon')
             + '<div class="name">' + esc(row.name) + '</div>'
@@ -2662,12 +2743,16 @@ function renderCharaDetail() {
       + '</select>';
   }
 
-  function openPiecePicker() {
+  function openPiecePicker(characters) {
+    characters = characters || { rows: [] };
     var filter = { rank: '', type: '', limit: '', charaId: '', sort: '', order: 'desc',
       keyword: '', statsMode: 'lv1' };
-    var charaOptions = S.charaOptions || [];
+    var offset = 0, limit = 200, criteria = null, ranks = [], types = [];
     function fetch(query) {
-      return api('/api/view/pieces-catalog?limit=200&q=' + encodeURIComponent(query)
+      var next = JSON.stringify([query, filter.rank, filter.type, filter.limit, filter.charaId,
+        filter.sort, filter.order, filter.keyword]);
+      if (next !== criteria) { offset = 0; criteria = next; }
+      return api('/api/view/pieces-catalog?limit=' + limit + '&offset=' + offset + '&q=' + encodeURIComponent(query)
         + '&rank=' + encodeURIComponent(filter.rank)
         + '&type=' + encodeURIComponent(filter.type)
         + '&limitMode=' + encodeURIComponent(filter.limit)
@@ -2676,128 +2761,143 @@ function renderCharaDetail() {
         + '&order=' + encodeURIComponent(filter.order || 'desc')
         + '&keyword=' + encodeURIComponent(filter.keyword));
     }
-    var ready = charaOptions.length
-      ? Promise.resolve()
-      : api('/api/view/charas?limit=200').then(function (data) {
-          S.charaOptions = (data.rows || []).map(function (row) {
-            return { charaId: row.charaId, name: row.name };
-          });
-          charaOptions = S.charaOptions;
-        }).catch(function () {});
-    ready.then(function () {
-      openPicker({
-        title: '添加记忆结晶',
-        placeholder: '搜索结晶名称或 pieceId',
-        load: fetch,
-        meta: function (data) { return '匹配 ' + data.total + ' 条'; },
-        render: function (rows, data) {
-          var html = '<div class="toolbar"><select data-pick-rank>'
-            + selectOptions(data && data.ranks, filter.rank) + '</select>'
-            + '<select data-pick-type>' + selectOptions(data && data.types, filter.type, pieceTypeLabel)
-            + '</select>'
-            + '<select data-pick-limit>'
-            + '<option value="">限制：全部</option>'
-            + '<option value="limited"' + (filter.limit === 'limited' ? ' selected' : '') + '>限制：仅限指定角色</option>'
-            + '<option value="free"' + (filter.limit === 'free' ? ' selected' : '') + '>限制：通用</option>'
-            + '</select>'
-            + '<select data-pick-chara><option value="">角色：全部</option>'
-            + charaOptions.map(function (row) {
-                return '<option value="' + esc(row.charaId) + '"'
-                  + (String(row.charaId) === String(filter.charaId) ? ' selected' : '') + '>'
-                  + esc(row.name) + '</option>';
-              }).join('')
-            + '</select>'
-            + pieceSortSelect(filter.sort)
-            + pieceOrderSelect(filter.order)
-            + '<input type="text" data-pick-keyword placeholder="技能关键词" value="'
-            + esc(filter.keyword) + '">'
-            + '<select data-pick-stats>'
-            + '<option value="lv1"' + (filter.statsMode === 'lv1' ? ' selected' : '') + '>数值：1 级</option>'
-            + '<option value="max"' + (filter.statsMode === 'max' ? ' selected' : '') + '>数值：满级</option>'
-            + '</select></div><div class="grid wide">';
-          rows.forEach(function (row) {
-            var stats = (filter.statsMode === 'max' ? row.statsMax : row.statsLv1) || row.statsLv1 || {};
-            html += tileHtml(
-              thumb(row.icon, row.name, 'icon'),
-              row.name,
-              '#' + row.pieceId + ' · ' + pieceTypeLabel(row.type) + ' · ' + pieceRankLabel(row.rank),
-              row.addable
-                ? '<div class="small pieceStats">HP ' + fmt(stats.hp) + ' · 攻 ' + fmt(stats.attack)
-                  + ' · 防 ' + fmt(stats.defense)
-                  + (filter.statsMode === 'max' ? '（满级 Lv' + esc(row.maxLevel || '?') + '）' : '（1 级）')
-                  + '</div>'
-                  + '<div class="small pieceSkill" title="' + esc(nl(row.activeSkill
-                      ? [row.activeSkill.name, row.activeSkill.description].filter(Boolean).join(' — ')
-                      : '')) + '">'
-                  + esc(row.activeSkill
-                    ? (row.activeSkill.description || row.activeSkill.name || '')
-                    : '（无技能数据）') + '</div>'
-                  + '<div class="row"><input data-lv type="number" min="1" value="1"><span class="small">lv</span>'
-                  + '<input data-lb type="number" min="0" max="4" value="0"><span class="small">突</span></div>'
-                  + '<div class="row"><button class="mini" data-add>添加</button></div>'
-                : '<div class="row"><span class="tag warn">缺成长数据</span></div>',
-              '<span class="tag">' + esc(row.rank || '') + '</span>'
-                + (row.ownedCount ? '<span class="tag ok">已有 ' + row.ownedCount + '</span>' : '')
-            );
-          });
-          return html + '</div>';
-        },
-        bind: function (host, rows) {
-          function reload() { if (host._reload) { host._reload(); } }
-          [['[data-pick-limit]', 'limit'], ['[data-pick-chara]', 'charaId'],
-            ['[data-pick-rank]', 'rank'], ['[data-pick-type]', 'type']].forEach(function (pair) {
-            var el = host.querySelector(pair[0]);
-            if (el) {
-              el.addEventListener('change', function () {
-                filter[pair[1]] = el.value;
-                reload();
-              });
-            }
-          });
-          var sortSelect = host.querySelector('[data-piece-sort]');
-          if (sortSelect) {
-            sortSelect.addEventListener('change', function () {
-              filter.sort = sortSelect.value;
-              reload();
-            });
+    openPicker({
+      title: '添加记忆结晶',
+      placeholder: '搜索结晶名称或 pieceId（留空列出全部已实装）',
+      load: fetch,
+      renderEmpty: true,
+      meta: function (data) { return '匹配 ' + data.total + ' 条'; },
+      render: function (rows, data) {
+        // Keep the filter choices usable even when a combination has no results.
+        (data.ranks || []).forEach(function (v) { if (ranks.indexOf(v) < 0) { ranks.push(v); } });
+        (data.types || []).forEach(function (v) { if (types.indexOf(v) < 0) { types.push(v); } });
+        var html = '<div class="toolbar"><select data-pick-rank>'
+          + selectOptions(ranks, filter.rank) + '</select>'
+          + '<select data-pick-type>' + selectOptions(types, filter.type, pieceTypeLabel)
+          + '</select>'
+          + '<select data-pick-limit>'
+          + '<option value="">限制：全部</option>'
+          + '<option value="limited"' + (filter.limit === 'limited' ? ' selected' : '') + '>限制：仅限指定角色</option>'
+          + '<option value="free"' + (filter.limit === 'free' ? ' selected' : '') + '>限制：通用</option>'
+          + '</select>'
+          + '<select data-pick-chara><option value="">角色：全部</option>'
+          + (characters.rows || []).map(function (row) {
+              return '<option value="' + esc(row.charaId) + '"'
+                + (String(row.charaId) === String(filter.charaId) ? ' selected' : '') + '>'
+                + esc(row.name) + '</option>';
+            }).join('')
+          + '</select>'
+          + pieceSortSelect(filter.sort)
+          + pieceOrderSelect(filter.order)
+          + '<input type="text" data-pick-keyword placeholder="技能关键词" value="'
+          + esc(filter.keyword) + '">'
+          + '<select data-pick-stats>'
+          + '<option value="lv1"' + (filter.statsMode === 'lv1' ? ' selected' : '') + '>数值：1 级</option>'
+          + '<option value="max"' + (filter.statsMode === 'max' ? ' selected' : '') + '>数值：满级</option>'
+          + '</select>'
+          + (characters.partial ? '<span class="small">角色列表未完整载入</span>' : '');
+        var pages = Math.ceil(data.total / limit);
+        if (pages > 1) {
+          html += '<label>页码 <select data-pick-page>';
+          for (var p = 0; p < pages; p++) {
+            html += '<option value="' + p * limit + '"' + (p * limit === data.offset ? ' selected' : '')
+              + '>第 ' + (p + 1) + ' / ' + pages + ' 页</option>';
           }
-          var orderSelect = host.querySelector('[data-piece-order]');
-          if (orderSelect) {
-            orderSelect.addEventListener('change', function () {
-              filter.order = orderSelect.value;
-              reload();
-            });
-          }
-          var statsSelect = host.querySelector('[data-pick-stats]');
-          if (statsSelect) {
-            statsSelect.addEventListener('change', function () {
-              filter.statsMode = statsSelect.value;
-              reload();
-            });
-          }
-          var keyword = host.querySelector('[data-pick-keyword]');
-          if (keyword) {
-            keyword.addEventListener('change', function () {
-              filter.keyword = keyword.value.trim();
-              reload();
-            });
-            keyword.addEventListener('keydown', function (event) {
-              if (event.key === 'Enter') {
-                filter.keyword = keyword.value.trim();
-                reload();
-              }
-            });
-          }
-          host.querySelectorAll('[data-add]').forEach(function (button, index) {
-            button.addEventListener('click', function () {
-              var tileEl = button.closest('.tile');
-              var level = Math.floor(Number(tileEl.querySelector('[data-lv]').value || 1));
-              var lb = Math.floor(Number(tileEl.querySelector('[data-lb]').value || 0));
-              edit([{ op: 'piece.add', pieceId: rows[index].pieceId, level: level, lbCount: lb }]);
-            });
+          html += '</select></label>';
+        }
+        html += '<span class="small">筛选立即生效</span></div>';
+        if (!rows.length) { return html + '<div class="empty">没有匹配项</div>'; }
+        html += '<div class="grid wide">';
+        rows.forEach(function (row) {
+          var stats = (filter.statsMode === 'max' ? row.statsMax : row.statsLv1) || row.statsLv1 || {};
+          html += tileHtml(
+            thumb(row.icon, row.name, 'icon'),
+            row.name,
+            '#' + row.pieceId + ' · ' + pieceTypeLabel(row.type) + ' · ' + pieceRankLabel(row.rank),
+            row.addable
+              ? '<div class="small pieceStats">HP ' + fmt(stats.hp) + ' · 攻 ' + fmt(stats.attack)
+                + ' · 防 ' + fmt(stats.defense)
+                + (filter.statsMode === 'max' ? '（满级 Lv' + esc(row.maxLevel || '?') + '）' : '（1 级）')
+                + '</div>'
+                + '<div class="small pieceSkill" title="' + esc(nl(row.activeSkill
+                    ? [row.activeSkill.name, row.activeSkill.description].filter(Boolean).join(' — ')
+                    : '')) + '">'
+                + esc(row.activeSkill
+                  ? (row.activeSkill.description || row.activeSkill.name || '')
+                  : '（无技能数据）') + '</div>'
+                + '<div class="row"><input data-lv type="number" min="1" value="1"><span class="small">lv</span>'
+                + '<input data-lb type="number" min="0" max="4" value="0"><span class="small">突</span></div>'
+                + '<div class="row"><button class="mini" data-add>添加</button></div>'
+              : '<div class="row"><span class="tag warn">缺成长数据</span></div>',
+            '<span class="tag">' + esc(row.rank || '') + '</span>'
+              + (row.ownedCount ? '<span class="tag ok">已有 ' + row.ownedCount + '</span>' : '')
+          );
+        });
+        return html + '</div>';
+      },
+      bind: function (host, rows) {
+        var page = host.querySelector('[data-pick-page]');
+        if (page) {
+          page.addEventListener('change', function () {
+            offset = Number(page.value);
+            host._reload();
           });
         }
-      });
+        [['[data-pick-limit]', 'limit'], ['[data-pick-chara]', 'charaId'],
+          ['[data-pick-rank]', 'rank'], ['[data-pick-type]', 'type']].forEach(function (pair) {
+          var el = host.querySelector(pair[0]);
+          if (el) {
+            el.addEventListener('change', function () {
+              filter[pair[1]] = el.value;
+              if (host._reload) { host._reload(); }
+            });
+          }
+        });
+        var sortSelect = host.querySelector('[data-piece-sort]');
+        if (sortSelect) {
+          sortSelect.addEventListener('change', function () {
+            filter.sort = sortSelect.value;
+            if (host._reload) { host._reload(); }
+          });
+        }
+        var orderSelect = host.querySelector('[data-piece-order]');
+        if (orderSelect) {
+          orderSelect.addEventListener('change', function () {
+            filter.order = orderSelect.value;
+            if (host._reload) { host._reload(); }
+          });
+        }
+        var statsSelect = host.querySelector('[data-pick-stats]');
+        if (statsSelect) {
+          statsSelect.addEventListener('change', function () {
+            filter.statsMode = statsSelect.value;
+            if (host._reload) { host._reload(); }
+          });
+        }
+        var keyword = host.querySelector('[data-pick-keyword]');
+        if (keyword) {
+          keyword.addEventListener('change', function () {
+            filter.keyword = keyword.value.trim();
+            if (host._reload) { host._reload(); }
+          });
+          keyword.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') {
+              filter.keyword = keyword.value.trim();
+              if (host._reload) { host._reload(); }
+            }
+          });
+        }
+        host.querySelectorAll('[data-add]').forEach(function (button, index) {
+          button.addEventListener('click', function (event) {
+            var tileEl = button.closest('.tile');
+            var level = readInteger(tileEl.querySelector('[data-lv]'));
+            if (level === null) { event.preventDefault(); return; }
+            var lb = readInteger(tileEl.querySelector('[data-lb]'));
+            if (lb === null) { event.preventDefault(); return; }
+            edit([{ op: 'piece.add', pieceId: rows[index].pieceId, level: level, lbCount: lb }]);
+          });
+        });
+      }
     });
   }
 
@@ -2836,7 +2936,7 @@ function renderCharaDetail() {
     var url = '/api/view/quests-tree?q=' + encodeURIComponent(page.q || '')
       + (page.only ? '&only=' + page.only : '')
       + (page.catalog ? '&catalog=1' : '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var parts = data.parts || [];
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索部、章、话或任务 ID">'
         + '<select data-only><option value="">全部</option><option value="uncleared">未通关</option>'
@@ -2961,7 +3061,7 @@ function renderCharaDetail() {
     var page = pageOf(tabId);
     var url = '/api/view/sections-tree?q=' + encodeURIComponent(page.q || '')
       + (page.catalog ? '&catalog=1' : '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var parts = data.parts || [];
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索部、章、区域或小节 ID">'
         + '<button data-unlock>全部设为可玩</button><button data-clear>全部标记已通</button>'
@@ -3089,7 +3189,7 @@ function renderCharaDetail() {
   }
 
   function renderChapterMap() {
-    return api('/api/view/chapter-map?chapterId=' + encodeURIComponent(S.chapterMap)).then(function (map) {
+    return paintCurrent(api('/api/view/chapter-map?chapterId=' + encodeURIComponent(S.chapterMap)), function (map) {
       var html = '<div class="crumbs"><button class="mini" data-chapter-back>章节一览</button>'
         + '<span>›</span><span class="small">' + esc(map.chapterNoForView || '') + ' '
         + esc(map.title || '') + '</span></div>';
@@ -3148,7 +3248,7 @@ function renderCharaDetail() {
   }
 
 function renderSectionDetail() {
-    return api('/api/view/section?sectionId=' + encodeURIComponent(S.sectionSel)).then(function (d) {
+    return paintCurrent(api('/api/view/section?sectionId=' + encodeURIComponent(S.sectionSel)), function (d) {
       var state = d.cleared ? '已通关' : (d.canPlay ? '已解锁' : '未解锁');
       var html = '<div class="crumbs"><button class="mini" data-section-back>章节</button>'
         + '<span>›</span><span class="small">' + esc(d.title || d.sectionId) + '</span></div>';
@@ -3242,7 +3342,7 @@ function renderSectionDetail() {
   function renderChapters() {
     if (S.sectionSel) { return renderSectionDetail(); }
     if (S.chapterMap) { return renderChapterMap(); }
-    return api('/api/view/chapters').then(function (data) {
+    return paintCurrent(api('/api/view/chapters'), function (data) {
       var html = '<div class="toolbar"><button data-clear>全部章节标记已通</button>'
         + '<button data-reset>全部章节标记未通</button><span class="spacer"></span>'
         + '<span class="small">共 ' + data.total + ' 章</span></div>'
@@ -3314,7 +3414,7 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 挑战
 
   function renderChallenges() {
-    return api('/api/view/challenges').then(function (data) {
+    return paintCurrent(api('/api/view/challenges'), function (data) {
       var html = '<p class="small">目标次数取自官方条件文案（如「通关剧情3次」）；没有条件文案的 '
         + data.hiddenUnknown + ' 条不显示；' + data.withoutTarget
         + ' 条官方未提供目标次数，目标列显示「—」（编辑器不从文案推测）。已达成是累计次数，不是开关。</p>';
@@ -3362,7 +3462,7 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 扭蛋
 
   function renderGacha() {
-    return api('/api/view/gacha').then(function (data) {
+    return paintCurrent(api('/api/view/gacha'), function (data) {
       var html = '<section class="panel"><h2>扭蛋计数（userGachaKindList）</h2>'
         + '<div class="toolbar"><button data-reset>全部 kinds 总次数清零</button>'
         + '<span class="spacer"></span><span class="small">每行可单独设置总次数</span></div>'
@@ -3420,68 +3520,73 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 养成素材（gift）
 
   function renderGifts() {
-    return api('/api/view/gifts').then(function (data) {
-      var groups = data.groups || [];
+    return paintCurrent(api('/api/view/gifts'), function (data) {
+      var groups = data.groups || [], host = $('main'), page = pageOf('gifts');
       if (!groups.length) {
-        $('main').innerHTML = '<div class="empty">没有养成素材</div>';
+        host.innerHTML = '<div class="empty">没有养成素材</div>';
         return;
       }
-      var active = S.giftTab;
-      if (!active || !groups.some(function (group) { return group.label === active; })) {
-        active = groups[0].label;
+      if (!groups.some(function (group) { return group.label === S.giftTab; })) {
+        S.giftTab = groups[0].label;
       }
-      S.giftTab = active;
-      var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索素材名称或 giftId">'
-        + '<span class="spacer"></span><span class="small">' + data.total + ' 种 · ' + groups.length
-        + ' 类（未拥有显示 0）</span></div><div class="subtabs">';
+      var html = '<div class="toolbar"><input type="search" data-search aria-label="搜索全部养成素材" placeholder="搜索全部素材名称或 ID">'
+        + '<span class="spacer"></span><span class="small" role="status" data-summary></span></div><div class="subtabs">';
       groups.forEach(function (group) {
-        html += '<button class="subtab' + (group.label === active ? ' active' : '') + '" data-gift-tab="'
-          + esc(group.label) + '">' + esc(group.label) + ' <span class="small">' + group.total
-          + '</span></button>';
+        html += '<button class="subtab" data-gift-tab="' + esc(group.label) + '">' + esc(group.label)
+          + ' <span class="small">' + esc(group.total) + '</span></button>';
       });
-      html += '</div>';
-      var current = groups.filter(function (group) { return group.label === active; })[0];
-      html += '<div class="grid">';
-      current.rows.forEach(function (row) {
-        html += tileHtml(
-          thumb(row.icon, row.name, 'icon'),
-          row.name,
-          '#' + row.giftId,
-          '<div class="row"><input data-gift type="number" min="0" value="' + esc(row.quantity) + '">'
-            + '<button class="mini" data-save>应用</button></div>'
-            + statLine([['累计', row.total]]),
-          (row.owned ? '<span class="tag ok">已拥有</span>' : '<span class="tag">未拥有</span>')
-        );
-      });
-      html += '</div>';
-      $('main').innerHTML = html;
-      $('main').querySelectorAll('[data-gift-tab]').forEach(function (button) {
+      host.innerHTML = html + '</div><div class="grid"></div><div class="empty" data-empty hidden>没有匹配的素材</div>';
+      var search = host.querySelector('[data-search]'), grid = host.querySelector('.grid');
+      var tabs = host.querySelectorAll('[data-gift-tab]'), tiles = new Map();
+      search.value = page.q || '';
+      function tileFor(row) {
+        if (tiles.has(row.giftId)) { return tiles.get(row.giftId); }
+        var wrap = document.createElement('div');
+        wrap.innerHTML = tileHtml(thumb(row.icon, row.name, 'icon'), row.name, '#' + row.giftId,
+          '<div class="row"><input data-gift type="number" min="0" value="' + esc(row.quantity)
+            + '"><button class="mini" data-save>应用</button></div>' + statLine([['累计', row.total]]),
+          row.owned ? '<span class="tag ok">已拥有</span>' : '<span class="tag">未拥有</span>');
+        var tile = wrap.firstElementChild;
+        tile.querySelector('[data-save]').addEventListener('click', function () {
+          var value = readInteger(tile.querySelector('[data-gift]'));
+          if (value !== null) { edit([{ op: 'gift.set', giftId: row.giftId, quantity: value }]); }
+        });
+        tiles.set(row.giftId, tile);
+        return tile;
+      }
+      function showRows() {
+        var query = search.value.trim().toLowerCase(), byId = query.charAt(0) === '#';
+        var fragment = document.createDocumentFragment(), hits = 0;
+        groups.forEach(function (group) {
+          if (!query && group.label !== S.giftTab) { return; }
+          group.rows.forEach(function (row) {
+            var id = String(row.giftId);
+            if (query && !(byId ? query.length > 1 && id.indexOf(query.slice(1)) >= 0 :
+                id.indexOf(query) >= 0 || String(row.name).toLowerCase().indexOf(query) >= 0)) { return; }
+            fragment.appendChild(tileFor(row));
+            hits++;
+          });
+        });
+        grid.textContent = '';
+        grid.appendChild(fragment);
+        host.querySelector('[data-empty]').hidden = hits !== 0;
+        host.querySelector('[data-summary]').textContent = query ? '全部分类 · 匹配 ' + hits + ' 种' :
+          data.total + ' 种 · ' + groups.length + ' 类（未拥有显示 0）';
+        tabs.forEach(function (button) {
+          var selected = !query && button.getAttribute('data-gift-tab') === S.giftTab;
+          button.classList.toggle('active', selected);
+          button.setAttribute('aria-pressed', String(selected));
+        });
+      }
+      tabs.forEach(function (button) {
         button.addEventListener('click', function () {
           S.giftTab = button.getAttribute('data-gift-tab');
-          render();
+          search.value = page.q = '';
+          showRows();
         });
       });
-      var search = $('main').querySelector('[data-search]');
-      var timer = null;
-      search.addEventListener('input', function () {
-        if (timer) { clearTimeout(timer); }
-        timer = setTimeout(function () {
-          var needle = search.value.trim().toLowerCase();
-          $('main').querySelectorAll('.grid .tile').forEach(function (tile) {
-            var text = tile.textContent.toLowerCase();
-            tile.style.display = !needle || text.indexOf(needle) >= 0 ? '' : 'none';
-          });
-        }, 200);
-      });
-      var rows = current.rows;
-      $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
-        button.addEventListener('click', function () {
-          var input = button.closest('.tile').querySelector('[data-gift]');
-          var value = readInteger(input);
-          if (value === null) { return; }
-          edit([{ op: 'gift.set', giftId: rows[index].giftId, quantity: value }]);
-        });
-      });
+      search.addEventListener('input', function () { page.q = search.value; showRows(); });
+      showRows();
     });
   }
 
@@ -3520,6 +3625,16 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 原始 JSON
 
   function renderRaw() {
+    var epoch = renderEpoch, latestRead = 0;
+    function showRead(path, draw) {
+      var read = ++latestRead;
+      var output = $('rawOut');
+      api(path).then(function (data) {
+        if (epoch === renderEpoch && read === latestRead) { draw(output, data); }
+      }, function (error) {
+        if (epoch === renderEpoch && read === latestRead) { output.textContent = '读取失败：' + error.message; }
+      });
+    }
     $('main').innerHTML = '<section class="panel"><h2>按路径读写</h2>'
       + '<p class="small">路径语法：state.gameUser.riche · state.userItemList[itemId=YELL].quantity · '
       + 'state.userQuestBattleList[questBattleId=10110151].cleared。类型必须与原值一致，否则拒绝写入。</p>'
@@ -3531,9 +3646,9 @@ function renderSectionDetail() {
     $('rawRead').addEventListener('click', function () {
       var path = $('rawPath').value.trim();
       if (!path) { return; }
-      api('/api/raw?path=' + encodeURIComponent(path)).then(function (data) {
-        $('rawOut').textContent = JSON.stringify(data.value, null, 2);
-      }).catch(function (error) { $('rawOut').textContent = '读取失败：' + error.message; });
+      showRead('/api/raw?path=' + encodeURIComponent(path), function (output, data) {
+        output.textContent = JSON.stringify(data.value, null, 2);
+      });
     });
     $('rawWrite').addEventListener('click', function () {
       var path = $('rawPath').value.trim();
@@ -3544,10 +3659,10 @@ function renderSectionDetail() {
       edit([{ op: 'raw.set', path: path, value: value }]);
     });
     $('rawPreview').addEventListener('click', function () {
-      api('/api/raw').then(function (data) {
+      showRead('/api/raw', function (output, data) {
         var text = JSON.stringify(data.value, null, 1);
-        $('rawOut').textContent = text.length > 200000 ? text.slice(0, 200000) + '\n…（截断）' : text;
-      }).catch(function (error) { $('rawOut').textContent = '读取失败：' + error.message; });
+        output.textContent = text.length > 200000 ? text.slice(0, 200000) + '\n…（截断）' : text;
+      });
     });
   }
 

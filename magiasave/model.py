@@ -4198,6 +4198,22 @@ class Editor:
         deck["questPositionHelper"] = position
         extra.add("state.userDeckList[deckType=%s]" % deck.get("deckType"))
 
+    @staticmethod
+    def _sync_quest_deck_leader(profile, deck, extra):
+        # A quest leader must belong to the active team, not the separate support position.
+        if not isinstance(deck.get("deckType"), int) or deck["deckType"] >= 20:
+            return
+        members = [deck["userCardId%d" % i] for i in range(1, 11)
+                   if deck.get("userCardId%d" % i)
+                   and deck.get("questPositionId%d" % i) in range(1, 10)]
+        if deck.get("questEpisodeUserCardId") not in members:
+            row = profile["state"]["userDeckList"].index(deck)
+            extra.add("state.userDeckList[%d].questEpisodeUserCardId" % row)
+            if members:
+                deck["questEpisodeUserCardId"] = members[0]
+            else:
+                deck.pop("questEpisodeUserCardId", None)
+
     def _op_deck_member(self, profile, op, _force, extra):
         """队伍第 1..4 位可编辑；支援位由好友填充，不在这里。"""
         deck = self._deck_target(profile, op)
@@ -4233,6 +4249,7 @@ class Editor:
                     raise ValidationError("第 %s 个格子已经有角色了" % position,
                                           code="deck_position_taken")
             deck["questPositionId%d" % slot] = position
+        self._sync_quest_deck_leader(profile, deck, extra)
         extra.add("state.userDeckList[deckType=%s]" % deck_type)
 
     def _op_deck_removeMember(self, profile, op, _force, extra):
@@ -4243,6 +4260,7 @@ class Editor:
         deck.pop("userCardId%d" % slot, None)
         for piece_slot in range(1, 6):
             deck.pop("userPieceId%02d%d" % (slot, piece_slot), None)
+        self._sync_quest_deck_leader(profile, deck, extra)
         extra.add("state.userDeckList[deckType=%s]" % deck.get("deckType"))
 
     def _op_deck_swap(self, profile, op, _force, extra):
