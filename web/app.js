@@ -182,19 +182,30 @@
     return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
   }
 
-  function restoreScroll() {
+  function restoreScroll(epoch) {
     var y = SCROLL.key === viewKey() ? SCROLL.y : 0;
     window.scrollTo(0, y);
     SCROLL.ready = true;
     if (!y) { return; }
     // 内容高度在下一帧才稳定（图片 / SVG 布局），再校一次。
     window.requestAnimationFrame(function () {
+      if (epoch !== renderEpoch) { return; }
       var max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
       window.scrollTo(0, Math.min(y, Math.max(0, max - window.innerHeight)));
     });
   }
 
+  // Only the latest navigation may paint. Let older reads finish without touching the visible form.
+  var renderEpoch = 0;
+  function paintCurrent(promise, draw) {
+    var epoch = renderEpoch;
+    return promise.then(function (value) {
+      if (epoch === renderEpoch) { return draw(value); }
+    });
+  }
+
   function render() {
+    var epoch = ++renderEpoch;
     if (!S.status || !S.status.loaded) {
       $('main').innerHTML = '<div class="empty" id="emptyHint">请先打开一个存档 zip。</div>';
       return;
@@ -224,10 +235,11 @@
       default: task = Promise.resolve();
     }
     return task.then(function () {
-      restoreScroll();
+      if (epoch === renderEpoch) { restoreScroll(epoch); }
     }, function (error) {
+      if (epoch !== renderEpoch) { return; }
       host.innerHTML = '<div class="empty">加载失败：' + esc(error.message) + '</div>';
-      restoreScroll();
+      restoreScroll(epoch);
     });
   }
 
@@ -323,7 +335,7 @@
   // ------------------------------------------------------------ 概览
 
   function renderOverview() {
-    return api('/api/overview?diff=0').then(function (data) {
+    return paintCurrent(api('/api/overview?diff=0'), function (data) {
       var player = data.player;
       var currency = data.currency;
       var counts = data.counts;
@@ -387,7 +399,7 @@
   // ------------------------------------------------------------ 资源与状态
 
   function renderResources() {
-    return Promise.all([api('/api/overview?diff=0'), api('/api/view/status')]).then(function (results) {
+    return paintCurrent(Promise.all([api('/api/overview?diff=0'), api('/api/view/status')]), function (results) {
       var data = results[0];
       var statusRows = results[1].rows;
       var currency = data.currency;
@@ -670,7 +682,7 @@
 
   function renderItemFamilies() {
     var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
-    return api('/api/view/items-families?scope=' + scope).then(function (data) {
+    return paintCurrent(api('/api/view/items-families?scope=' + scope), function (data) {
       var html = '<div class="toolbar">' + itemCrumb()
         + '<input type="text" data-global-search placeholder="全局搜索道具（名称 / itemId），回车确认">'
         + '<select data-scope><option value="player">玩家可见道具</option>'
@@ -725,8 +737,8 @@
 
   function renderItemGroups(family) {
     var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
-    return api('/api/view/items-groups?family=' + encodeURIComponent(family)
-      + '&scope=' + scope).then(function (data) {
+    return paintCurrent(api('/api/view/items-groups?family=' + encodeURIComponent(family)
+      + '&scope=' + scope), function (data) {
       var html = '<div class="toolbar">' + itemCrumb()
         + '<input type="text" data-filter placeholder="过滤活动名">'
         + '<span class="spacer"></span><span class="small">' + data.total + ' 组活动</span></div>';
@@ -773,7 +785,7 @@
       + (group ? '&group=' + encodeURIComponent(group) : '')
       + '&offset=' + page.offset
       + '&limit=' + limit + '&sort=' + sort + '&q=' + encodeURIComponent(page.q || '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var owned = data.rows.filter(function (row) { return row.owned; }).length;
       var html = '<div class="toolbar">' + itemCrumb()
         + (searching ? '<span class="small">搜索「' + esc(S.itemsNav.search) + '」</span>'
@@ -904,7 +916,7 @@
     var page = pageOf(tabId);
     var limit = 120;
     var url = '/api/view/charas?offset=' + page.offset + '&limit=' + limit + '&q=' + encodeURIComponent(page.q || '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索角色名称或卡片名">'
         + '<button data-add-chara>添加魔法少女…</button>'
         + '<span class="spacer"></span><span class="small">共 ' + data.total
@@ -1400,7 +1412,7 @@ if (panel === 'magia') {
 
 function renderCharaDetail() {
     var panel = S.charaPanel;
-    return api('/api/chara?userCardId=' + encodeURIComponent(S.charaSel)).then(function (d) {
+    return paintCurrent(api('/api/chara?userCardId=' + encodeURIComponent(S.charaSel)), function (d) {
       var extra = null;
       if (panel === 'attribute') {
         extra = api('/api/view/attribute?charaId=' + encodeURIComponent(d.charaId)).then(function (data) {
@@ -1411,7 +1423,7 @@ function renderCharaDetail() {
           d.awakening = data;
         });
       }
-      return (extra || Promise.resolve()).then(function () { paintCharaDetail(d, panel); });
+      return paintCurrent(extra || Promise.resolve(), function () { paintCharaDetail(d, panel); });
     });
   }
 
@@ -1639,7 +1651,7 @@ function renderCharaDetail() {
       + '&limitMode=' + encodeURIComponent(filter.limit || '')
       + '&charaId=' + encodeURIComponent(filter.charaId || '');
     var charaPromise = api('/api/view/charas?limit=200').catch(function () { return { rows: [] }; });
-    return Promise.all([api(url), charaPromise]).then(function (results) {
+    return paintCurrent(Promise.all([api(url), charaPromise]), function (results) {
       var data = results[0];
       var charaRows = (results[1] && results[1].rows) || [];
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索结晶名称或 pieceId">'
@@ -1745,7 +1757,7 @@ function renderCharaDetail() {
   }
 
   function renderPieceDetail() {
-    return api('/api/view/piece?id=' + encodeURIComponent(S.pieceSel)).then(function (d) {
+    return paintCurrent(api('/api/view/piece?id=' + encodeURIComponent(S.pieceSel)), function (d) {
       var html = '<div class="crumbs"><button class="mini" data-piece-back>记忆结晶一览</button>'
         + '<span>›</span><span class="small">' + esc(d.name) + '</span></div>';
       html += '<section class="panel charaHead">' + thumb(d.icon, d.name, 'charaFace')
@@ -1990,7 +2002,7 @@ function renderCharaDetail() {
 
   function renderDecks() {
     if (S.deckSel) { return renderDeckDetail(); }
-    return api('/api/view/decks').then(function (data) {
+    return paintCurrent(api('/api/view/decks'), function (data) {
       var questDecks = (data.decks || []).filter(function (deck) { return deck.kind === 'quest'; });
       var others = (data.decks || []).filter(function (deck) { return deck.kind !== 'quest'; });
       var html = '<div class="toolbar"><span class="small">任务编队 ' + questDecks.length + ' 个</span>'
@@ -2043,7 +2055,7 @@ function renderCharaDetail() {
   };
 
   function renderDeckDetail() {
-    return api('/api/view/decks').then(function (data) {
+    return paintCurrent(api('/api/view/decks'), function (data) {
       var deck = (data.decks || []).filter(function (item) {
         return String(item.deckType) === String(S.deckSel);
       })[0];
@@ -2690,7 +2702,7 @@ function renderCharaDetail() {
     var url = '/api/view/quests-tree?q=' + encodeURIComponent(page.q || '')
       + (page.only ? '&only=' + page.only : '')
       + (page.catalog ? '&catalog=1' : '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var parts = data.parts || [];
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索部、章、话或任务 ID">'
         + '<select data-only><option value="">全部</option><option value="uncleared">未通关</option>'
@@ -2815,7 +2827,7 @@ function renderCharaDetail() {
     var page = pageOf(tabId);
     var url = '/api/view/sections-tree?q=' + encodeURIComponent(page.q || '')
       + (page.catalog ? '&catalog=1' : '');
-    return api(url).then(function (data) {
+    return paintCurrent(api(url), function (data) {
       var parts = data.parts || [];
       var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索部、章、区域或小节 ID">'
         + '<button data-unlock>全部设为可玩</button><button data-clear>全部标记已通</button>'
@@ -2943,7 +2955,7 @@ function renderCharaDetail() {
   }
 
   function renderChapterMap() {
-    return api('/api/view/chapter-map?chapterId=' + encodeURIComponent(S.chapterMap)).then(function (map) {
+    return paintCurrent(api('/api/view/chapter-map?chapterId=' + encodeURIComponent(S.chapterMap)), function (map) {
       var html = '<div class="crumbs"><button class="mini" data-chapter-back>章节一览</button>'
         + '<span>›</span><span class="small">' + esc(map.chapterNoForView || '') + ' '
         + esc(map.title || '') + '</span></div>';
@@ -3002,7 +3014,7 @@ function renderCharaDetail() {
   }
 
 function renderSectionDetail() {
-    return api('/api/view/section?sectionId=' + encodeURIComponent(S.sectionSel)).then(function (d) {
+    return paintCurrent(api('/api/view/section?sectionId=' + encodeURIComponent(S.sectionSel)), function (d) {
       var state = d.cleared ? '已通关' : (d.canPlay ? '已解锁' : '未解锁');
       var html = '<div class="crumbs"><button class="mini" data-section-back>章节</button>'
         + '<span>›</span><span class="small">' + esc(d.title || d.sectionId) + '</span></div>';
@@ -3096,7 +3108,7 @@ function renderSectionDetail() {
   function renderChapters() {
     if (S.sectionSel) { return renderSectionDetail(); }
     if (S.chapterMap) { return renderChapterMap(); }
-    return api('/api/view/chapters').then(function (data) {
+    return paintCurrent(api('/api/view/chapters'), function (data) {
       var html = '<div class="toolbar"><button data-clear>全部章节标记已通</button>'
         + '<button data-reset>全部章节标记未通</button><span class="spacer"></span>'
         + '<span class="small">共 ' + data.total + ' 章</span></div>'
@@ -3168,7 +3180,7 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 挑战
 
   function renderChallenges() {
-    return api('/api/view/challenges').then(function (data) {
+    return paintCurrent(api('/api/view/challenges'), function (data) {
       var html = '<p class="small">目标次数取自官方条件文案（如「通关剧情3次」）；没有条件文案的 '
         + data.hiddenUnknown + ' 条不显示；' + data.withoutTarget
         + ' 条官方未提供目标次数，目标列显示「—」（编辑器不从文案推测）。已达成是累计次数，不是开关。</p>';
@@ -3216,7 +3228,7 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 扭蛋
 
   function renderGacha() {
-    return api('/api/view/gacha').then(function (data) {
+    return paintCurrent(api('/api/view/gacha'), function (data) {
       var html = '<section class="panel"><h2>扭蛋计数（userGachaKindList）</h2>'
         + '<div class="toolbar"><button data-reset>全部 kinds 总次数清零</button>'
         + '<span class="spacer"></span><span class="small">每行可单独设置总次数</span></div>'
@@ -3274,7 +3286,7 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 养成素材（gift）
 
   function renderGifts() {
-    return api('/api/view/gifts').then(function (data) {
+    return paintCurrent(api('/api/view/gifts'), function (data) {
       var groups = data.groups || [];
       if (!groups.length) {
         $('main').innerHTML = '<div class="empty">没有养成素材</div>';
@@ -3374,6 +3386,16 @@ function renderSectionDetail() {
   // ------------------------------------------------------------ 原始 JSON
 
   function renderRaw() {
+    var epoch = renderEpoch, latestRead = 0;
+    function showRead(path, draw) {
+      var read = ++latestRead;
+      var output = $('rawOut');
+      api(path).then(function (data) {
+        if (epoch === renderEpoch && read === latestRead) { draw(output, data); }
+      }, function (error) {
+        if (epoch === renderEpoch && read === latestRead) { output.textContent = '读取失败：' + error.message; }
+      });
+    }
     $('main').innerHTML = '<section class="panel"><h2>按路径读写</h2>'
       + '<p class="small">路径语法：state.gameUser.riche · state.userItemList[itemId=YELL].quantity · '
       + 'state.userQuestBattleList[questBattleId=10110151].cleared。类型必须与原值一致，否则拒绝写入。</p>'
@@ -3385,9 +3407,9 @@ function renderSectionDetail() {
     $('rawRead').addEventListener('click', function () {
       var path = $('rawPath').value.trim();
       if (!path) { return; }
-      api('/api/raw?path=' + encodeURIComponent(path)).then(function (data) {
-        $('rawOut').textContent = JSON.stringify(data.value, null, 2);
-      }).catch(function (error) { $('rawOut').textContent = '读取失败：' + error.message; });
+      showRead('/api/raw?path=' + encodeURIComponent(path), function (output, data) {
+        output.textContent = JSON.stringify(data.value, null, 2);
+      });
     });
     $('rawWrite').addEventListener('click', function () {
       var path = $('rawPath').value.trim();
@@ -3398,10 +3420,10 @@ function renderSectionDetail() {
       edit([{ op: 'raw.set', path: path, value: value }]);
     });
     $('rawPreview').addEventListener('click', function () {
-      api('/api/raw').then(function (data) {
+      showRead('/api/raw', function (output, data) {
         var text = JSON.stringify(data.value, null, 1);
-        $('rawOut').textContent = text.length > 200000 ? text.slice(0, 200000) + '\n…（截断）' : text;
-      }).catch(function (error) { $('rawOut').textContent = '读取失败：' + error.message; });
+        output.textContent = text.length > 200000 ? text.slice(0, 200000) + '\n…（截断）' : text;
+      });
     });
   }
 
