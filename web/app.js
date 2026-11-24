@@ -3371,67 +3371,72 @@ function renderSectionDetail() {
 
   function renderGifts() {
     return paintCurrent(api('/api/view/gifts'), function (data) {
-      var groups = data.groups || [];
+      var groups = data.groups || [], host = $('main'), page = pageOf('gifts');
       if (!groups.length) {
-        $('main').innerHTML = '<div class="empty">没有养成素材</div>';
+        host.innerHTML = '<div class="empty">没有养成素材</div>';
         return;
       }
-      var active = S.giftTab;
-      if (!active || !groups.some(function (group) { return group.label === active; })) {
-        active = groups[0].label;
+      if (!groups.some(function (group) { return group.label === S.giftTab; })) {
+        S.giftTab = groups[0].label;
       }
-      S.giftTab = active;
-      var html = '<div class="toolbar"><input type="text" data-search placeholder="搜索素材名称或 giftId">'
-        + '<span class="spacer"></span><span class="small">' + data.total + ' 种 · ' + groups.length
-        + ' 类（未拥有显示 0）</span></div><div class="subtabs">';
+      var html = '<div class="toolbar"><input type="search" data-search aria-label="搜索全部养成素材" placeholder="搜索全部素材名称或 ID">'
+        + '<span class="spacer"></span><span class="small" role="status" data-summary></span></div><div class="subtabs">';
       groups.forEach(function (group) {
-        html += '<button class="subtab' + (group.label === active ? ' active' : '') + '" data-gift-tab="'
-          + esc(group.label) + '">' + esc(group.label) + ' <span class="small">' + group.total
-          + '</span></button>';
+        html += '<button class="subtab" data-gift-tab="' + esc(group.label) + '">' + esc(group.label)
+          + ' <span class="small">' + esc(group.total) + '</span></button>';
       });
-      html += '</div>';
-      var current = groups.filter(function (group) { return group.label === active; })[0];
-      html += '<div class="grid">';
-      current.rows.forEach(function (row) {
-        html += tileHtml(
-          thumb(row.icon, row.name, 'icon'),
-          row.name,
-          '#' + row.giftId,
-          '<div class="row"><input data-gift type="number" min="0" value="' + esc(row.quantity) + '">'
-            + '<button class="mini" data-save>应用</button></div>'
-            + statLine([['累计', row.total]]),
-          (row.owned ? '<span class="tag ok">已拥有</span>' : '<span class="tag">未拥有</span>')
-        );
-      });
-      html += '</div>';
-      $('main').innerHTML = html;
-      $('main').querySelectorAll('[data-gift-tab]').forEach(function (button) {
+      host.innerHTML = html + '</div><div class="grid"></div><div class="empty" data-empty hidden>没有匹配的素材</div>';
+      var search = host.querySelector('[data-search]'), grid = host.querySelector('.grid');
+      var tabs = host.querySelectorAll('[data-gift-tab]'), tiles = new Map();
+      search.value = page.q || '';
+      function tileFor(row) {
+        if (tiles.has(row.giftId)) { return tiles.get(row.giftId); }
+        var wrap = document.createElement('div');
+        wrap.innerHTML = tileHtml(thumb(row.icon, row.name, 'icon'), row.name, '#' + row.giftId,
+          '<div class="row"><input data-gift type="number" min="0" value="' + esc(row.quantity)
+            + '"><button class="mini" data-save>应用</button></div>' + statLine([['累计', row.total]]),
+          row.owned ? '<span class="tag ok">已拥有</span>' : '<span class="tag">未拥有</span>');
+        var tile = wrap.firstElementChild;
+        tile.querySelector('[data-save]').addEventListener('click', function () {
+          var value = readInteger(tile.querySelector('[data-gift]'));
+          if (value !== null) { edit([{ op: 'gift.set', giftId: row.giftId, quantity: value }]); }
+        });
+        tiles.set(row.giftId, tile);
+        return tile;
+      }
+      function showRows() {
+        var query = search.value.trim().toLowerCase(), byId = query.charAt(0) === '#';
+        var fragment = document.createDocumentFragment(), hits = 0;
+        groups.forEach(function (group) {
+          if (!query && group.label !== S.giftTab) { return; }
+          group.rows.forEach(function (row) {
+            var id = String(row.giftId);
+            if (query && !(byId ? query.length > 1 && id.indexOf(query.slice(1)) >= 0 :
+                id.indexOf(query) >= 0 || String(row.name).toLowerCase().indexOf(query) >= 0)) { return; }
+            fragment.appendChild(tileFor(row));
+            hits++;
+          });
+        });
+        grid.textContent = '';
+        grid.appendChild(fragment);
+        host.querySelector('[data-empty]').hidden = hits !== 0;
+        host.querySelector('[data-summary]').textContent = query ? '全部分类 · 匹配 ' + hits + ' 种' :
+          data.total + ' 种 · ' + groups.length + ' 类（未拥有显示 0）';
+        tabs.forEach(function (button) {
+          var selected = !query && button.getAttribute('data-gift-tab') === S.giftTab;
+          button.classList.toggle('active', selected);
+          button.setAttribute('aria-pressed', String(selected));
+        });
+      }
+      tabs.forEach(function (button) {
         button.addEventListener('click', function () {
           S.giftTab = button.getAttribute('data-gift-tab');
-          render();
+          search.value = page.q = '';
+          showRows();
         });
       });
-      var search = $('main').querySelector('[data-search]');
-      var timer = null;
-      search.addEventListener('input', function () {
-        if (timer) { clearTimeout(timer); }
-        timer = setTimeout(function () {
-          var needle = search.value.trim().toLowerCase();
-          $('main').querySelectorAll('.grid .tile').forEach(function (tile) {
-            var text = tile.textContent.toLowerCase();
-            tile.style.display = !needle || text.indexOf(needle) >= 0 ? '' : 'none';
-          });
-        }, 200);
-      });
-      var rows = current.rows;
-      $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
-        button.addEventListener('click', function () {
-          var input = button.closest('.tile').querySelector('[data-gift]');
-          var value = readInteger(input);
-          if (value === null) { return; }
-          edit([{ op: 'gift.set', giftId: rows[index].giftId, quantity: value }]);
-        });
-      });
+      search.addEventListener('input', function () { page.q = search.value; showRows(); });
+      showRows();
     });
   }
 
