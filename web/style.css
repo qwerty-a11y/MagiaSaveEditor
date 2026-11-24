@@ -681,3 +681,7 @@ button.mini.star:hover { opacity: 1; border-color: #ffd479; }
   #modal.picker-searchable #modalSearch { grid-column:1; width:100%; min-width:0; }
   #modal.picker-searchable #modalClose { grid-column:2; }
 }
+/* ---- 结晶数值与技能常驻显示 ---- */
+.pieceStats { color: var(--text); opacity: .9; font-variant-numeric: tabular-nums; }
+.pieceSkill { color: #b8a6e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile .pieceSkill { max-width: 100%; }

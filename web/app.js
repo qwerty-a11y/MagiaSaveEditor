@@ -4,7 +4,7 @@
 
   var S = { status: null, tab: 'overview', page: {}, busy: false, piecePicker: null, charaSel: null, charaPanel: null,
     spiritSel: null, pieceSel: null, deckSel: null, chapterMap: null, sectionSel: null,
-    pieceFilter: { rank: '', type: '', limit: '', charaId: '' },
+    pieceFilter: { rank: '', type: '', limit: '', charaId: '', sort: '', keyword: '' },
     itemsNav: { family: null, group: null }, open: {} };
 
   var TABS = [
@@ -1637,7 +1637,9 @@ function renderCharaDetail() {
       + '&rank=' + encodeURIComponent(filter.rank || '')
       + '&type=' + encodeURIComponent(filter.type || '')
       + '&limitMode=' + encodeURIComponent(filter.limit || '')
-      + '&charaId=' + encodeURIComponent(filter.charaId || '');
+      + '&charaId=' + encodeURIComponent(filter.charaId || '')
+      + '&sort=' + encodeURIComponent(filter.sort || '')
+      + '&keyword=' + encodeURIComponent(filter.keyword || '');
     var charaPromise = api('/api/view/charas?limit=200').catch(function () { return { rows: [] }; });
     return Promise.all([api(url), charaPromise]).then(function (results) {
       var data = results[0];
@@ -1657,6 +1659,9 @@ function renderCharaDetail() {
               + esc(row.name) + '</option>';
           }).join('')
         + '</select>'
+        + pieceSortSelect(filter.sort)
+        + '<input type="text" data-keyword-filter placeholder="技能关键词" value="'
+        + esc(filter.keyword || '') + '">'
         + '<button data-add>添加记忆结晶…</button>'
         + '<button data-all-piece>全部等级设为…</button><span class="spacer"></span>'
         + '<span class="small">共 ' + data.total + ' 枚（同种可有多枚）· 点卡片看详情</span></div>';
@@ -1675,9 +1680,8 @@ function renderCharaDetail() {
             : '')
           + '<div class="row"><span class="tag">Lv ' + esc(row.level) + ' / ' + esc(row.maxLevel || '?') + '</span>'
           + '<span class="tag">突破 ' + esc(row.lbCount) + ' / 4</span></div>'
-          + statLine([['HP', row.hp]])
-          + statLine([['攻击', row.attack]])
-          + statLine([['防御', row.defense]])
+          + pieceStatsLine(row)
+          + pieceSkillLine(row)
           + '</div>';
       });
       html += '</div>' + pagerHtml(data.total, limit, page);
@@ -1698,6 +1702,26 @@ function renderCharaDetail() {
           filter.type = typeSelect.value;
           page.offset = 0;
           render();
+        });
+      }
+      var sortSelect = $('main').querySelector('[data-piece-sort]');
+      if (sortSelect) {
+        sortSelect.addEventListener('change', function () {
+          filter.sort = sortSelect.value;
+          page.offset = 0;
+          render();
+        });
+      }
+      var keywordInput = $('main').querySelector('[data-keyword-filter]');
+      if (keywordInput) {
+        var applyKeyword = function () {
+          filter.keyword = keywordInput.value.trim();
+          page.offset = 0;
+          render();
+        };
+        keywordInput.addEventListener('change', applyKeyword);
+        keywordInput.addEventListener('keydown', function (event) {
+          if (event.key === 'Enter') { applyKeyword(); }
         });
       }
       var limitSelect = $('main').querySelector('[data-limit-filter]');
@@ -2312,8 +2336,9 @@ function renderCharaDetail() {
         html += '<button class="mini" data-slot-swap="helper">换到这里</button>';
       } else if (member) {
         html += '<button class="mini" data-slot-swap="' + esc(member.slot) + '">换到这里</button>';
-      } else if (inPool && allowEmpty) {
-        html += '<button class="mini" data-slot-set="' + slot + '">放这里</button>';
+      } else if (inPool && !isHelper) {
+        // 空白格：把当前角色挪过去（结晶与位置一起走）
+        html += '<button class="mini" data-slot-move="' + slot + '">移到这里</button>';
       }
       html += '</div>';
     });
@@ -2321,6 +2346,12 @@ function renderCharaDetail() {
   }
 
   function bindSlotGrid(host, deckType, fromKey) {
+    host.querySelectorAll('[data-slot-move]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        edit([{ op: 'deck.swap', deckType: deckType, a: fromKey, b: 'position',
+          position: Number(button.getAttribute('data-slot-move')) }]);
+      });
+    });
     host.querySelectorAll('[data-slot-set]').forEach(function (button) {
       button.addEventListener('click', function () {
         edit([{ op: 'deck.helper', deckType: deckType,
@@ -2438,20 +2469,36 @@ function renderCharaDetail() {
   }
 
   function openDeckPiecePicker(deckType, member, slot) {
-    var filter = { rank: '', type: '' };
+    var filter = { rank: '', type: '', limit: '', charaId: '', sort: '' };
     openPicker({
       title: '给第 ' + member + ' 位（槽 ' + slot + '）选择记忆结晶',
       placeholder: '搜索结晶名称',
       load: function (q) {
         return api('/api/view/pieces?limit=200&q=' + encodeURIComponent(q)
           + '&rank=' + encodeURIComponent(filter.rank)
-          + '&type=' + encodeURIComponent(filter.type));
+          + '&type=' + encodeURIComponent(filter.type)
+          + '&limitMode=' + encodeURIComponent(filter.limit)
+          + '&charaId=' + encodeURIComponent(filter.charaId)
+          + '&sort=' + encodeURIComponent(filter.sort));
       },
       meta: function (data) { return '已拥有 ' + data.total + ' 枚'; },
       render: function (rows, data) {
         var html = '<div class="toolbar">'
           + '<select data-dp-rank>' + selectOptions(data.ranks || [], filter.rank) + '</select>'
           + '<select data-dp-type>' + selectOptions(data.types || [], filter.type, pieceTypeLabel) + '</select>'
+          + '<select data-dp-limit>'
+          + '<option value="">限制：全部</option>'
+          + '<option value="limited"' + (filter.limit === 'limited' ? ' selected' : '') + '>限制：仅限指定角色</option>'
+          + '<option value="free"' + (filter.limit === 'free' ? ' selected' : '') + '>限制：通用</option>'
+          + '</select>'
+          + '<select data-dp-chara><option value="">角色：全部</option>'
+          + (S.charaOptions || []).map(function (row) {
+              return '<option value="' + esc(row.charaId) + '"'
+                + (String(row.charaId) === String(filter.charaId) ? ' selected' : '') + '>'
+                + esc(row.name) + '</option>';
+            }).join('')
+          + '</select>'
+          + pieceSortSelect(filter.sort)
           + '<span class="small">' + rows.length + ' 枚</span></div>'
           + '<div class="grid wide">';
         rows.forEach(function (row) {
@@ -2475,6 +2522,22 @@ function renderCharaDetail() {
         if (typeSelect) {
           typeSelect.addEventListener('change', function () {
             filter.type = typeSelect.value;
+            if (host._reload) { host._reload(); }
+          });
+        }
+        [['[data-dp-limit]', 'limit'], ['[data-dp-chara]', 'charaId']].forEach(function (pair) {
+          var el = host.querySelector(pair[0]);
+          if (el) {
+            el.addEventListener('change', function () {
+              filter[pair[1]] = el.value;
+              if (host._reload) { host._reload(); }
+            });
+          }
+        });
+        var dpSort = host.querySelector('[data-piece-sort]');
+        if (dpSort) {
+          dpSort.addEventListener('change', function () {
+            filter.sort = dpSort.value;
             if (host._reload) { host._reload(); }
           });
         }
@@ -2543,15 +2606,43 @@ function renderCharaDetail() {
     return html;
   }
 
+  function pieceStatsLine(row) {
+    return '<div class="small pieceStats">HP ' + fmt(row.hp) + ' · 攻 ' + fmt(row.attack)
+      + ' · 防 ' + fmt(row.defense) + '</div>';
+  }
+
+  function pieceSkillLine(row) {
+    var skill = row.activeSkill;
+    if (!skill) { return '<div class="small">（无技能数据）</div>'; }
+    var label = skill.name || ('技能 ' + skill.skillId);
+    if (row.lbCount !== undefined && row.lbCount !== null) {
+      label += (row.lbCount >= 4 ? '（满破）' : '（突破 ' + row.lbCount + '）');
+    }
+    return '<div class="small pieceSkill" title="' + esc(nl(skill.description)) + '">'
+      + esc(label) + '</div>';
+  }
+
+  function pieceSortSelect(current) {
+    return '<select data-piece-sort>'
+      + '<option value="">排序：默认</option>'
+      + '<option value="level"' + (current === 'level' ? ' selected' : '') + '>排序：等级</option>'
+      + '<option value="hp"' + (current === 'hp' ? ' selected' : '') + '>排序：HP</option>'
+      + '<option value="attack"' + (current === 'attack' ? ' selected' : '') + '>排序：ATK</option>'
+      + '<option value="defense"' + (current === 'defense' ? ' selected' : '') + '>排序：DEF</option>'
+      + '</select>';
+  }
+
   function openPiecePicker() {
-    var filter = { rank: '', type: '', limit: '', charaId: '' };
+    var filter = { rank: '', type: '', limit: '', charaId: '', sort: '', keyword: '', statsMode: 'lv1' };
     var charaOptions = S.charaOptions || [];
     function fetch(query) {
       return api('/api/view/pieces-catalog?limit=200&q=' + encodeURIComponent(query)
         + '&rank=' + encodeURIComponent(filter.rank)
         + '&type=' + encodeURIComponent(filter.type)
         + '&limitMode=' + encodeURIComponent(filter.limit)
-        + '&charaId=' + encodeURIComponent(filter.charaId));
+        + '&charaId=' + encodeURIComponent(filter.charaId)
+        + '&sort=' + encodeURIComponent(filter.sort)
+        + '&keyword=' + encodeURIComponent(filter.keyword));
     }
     var ready = charaOptions.length
       ? Promise.resolve()
@@ -2564,9 +2655,9 @@ function renderCharaDetail() {
     ready.then(function () {
       openPicker({
         title: '添加记忆结晶',
-        placeholder: '搜索结晶名称或 pieceId（留空列出全部已实装）',
+        placeholder: '搜索结晶名称或 pieceId',
         load: fetch,
-        meta: function (data) { return '匹配 ' + data.total + ' 条，可选等级与突破'; },
+        meta: function (data) { return '匹配 ' + data.total + ' 条'; },
         render: function (rows, data) {
           var html = '<div class="toolbar"><select data-pick-rank>'
             + selectOptions(data && data.ranks, filter.rank) + '</select>'
@@ -2583,17 +2674,30 @@ function renderCharaDetail() {
                   + (String(row.charaId) === String(filter.charaId) ? ' selected' : '') + '>'
                   + esc(row.name) + '</option>';
               }).join('')
-            + '</select><span class="small">筛选立即生效</span></div><div class="grid wide">';
+            + '</select>'
+            + pieceSortSelect(filter.sort)
+            + '<input type="text" data-pick-keyword placeholder="技能关键词" value="'
+            + esc(filter.keyword) + '">'
+            + '<select data-pick-stats>'
+            + '<option value="lv1"' + (filter.statsMode === 'lv1' ? ' selected' : '') + '>数值：1 级</option>'
+            + '<option value="max"' + (filter.statsMode === 'max' ? ' selected' : '') + '>数值：满级</option>'
+            + '</select></div><div class="grid wide">';
           rows.forEach(function (row) {
+            var stats = (filter.statsMode === 'max' ? row.statsMax : row.statsLv1) || row.statsLv1 || {};
             html += tileHtml(
               thumb(row.icon, row.name, 'icon'),
               row.name,
-              '#' + row.pieceId + ' · ' + pieceTypeLabel(row.type),
+              '#' + row.pieceId + ' · ' + pieceTypeLabel(row.type) + ' · ' + pieceRankLabel(row.rank),
               row.addable
-                ? '<div class="row"><input data-lv type="number" min="1" value="1"><span class="small">lv</span>'
+                ? '<div class="small pieceStats">HP ' + fmt(stats.hp) + ' · 攻 ' + fmt(stats.attack)
+                  + ' · 防 ' + fmt(stats.defense)
+                  + (filter.statsMode === 'max' ? '（满级 Lv' + esc(row.maxLevel || '?') + '）' : '（1 级）')
+                  + '</div>'
+                  + '<div class="small pieceSkill" title="' + esc(nl(row.activeSkill && row.activeSkill.description)) + '">'
+                  + esc(row.activeSkill ? (row.activeSkill.name || '') : '（无技能数据）') + '</div>'
+                  + '<div class="row"><input data-lv type="number" min="1" value="1"><span class="small">lv</span>'
                   + '<input data-lb type="number" min="0" max="4" value="0"><span class="small">突</span></div>'
-                  + '<div class="row"><button class="mini" data-add>添加</button>'
-                  + '<button class="mini" data-preview="' + esc(row.pieceId) + '">预览</button></div>'
+                  + '<div class="row"><button class="mini" data-add>添加</button></div>'
                 : '<div class="row"><span class="tag warn">缺成长数据</span></div>',
               '<span class="tag">' + esc(row.rank || '') + '</span>'
                 + (row.ownedCount ? '<span class="tag ok">已有 ' + row.ownedCount + '</span>' : '')
@@ -2602,52 +2706,50 @@ function renderCharaDetail() {
           return html + '</div>';
         },
         bind: function (host, rows) {
-          var limitSelect = host.querySelector('[data-pick-limit]');
-          if (limitSelect) {
-            limitSelect.addEventListener('change', function () {
-              filter.limit = limitSelect.value;
-              if (host._reload) { host._reload(); }
+          function reload() { if (host._reload) { host._reload(); } }
+          [['[data-pick-limit]', 'limit'], ['[data-pick-chara]', 'charaId'],
+            ['[data-pick-rank]', 'rank'], ['[data-pick-type]', 'type']].forEach(function (pair) {
+            var el = host.querySelector(pair[0]);
+            if (el) {
+              el.addEventListener('change', function () {
+                filter[pair[1]] = el.value;
+                reload();
+              });
+            }
+          });
+          var sortSelect = host.querySelector('[data-piece-sort]');
+          if (sortSelect) {
+            sortSelect.addEventListener('change', function () {
+              filter.sort = sortSelect.value;
+              reload();
             });
           }
-          var charaSelect = host.querySelector('[data-pick-chara]');
-          if (charaSelect) {
-            charaSelect.addEventListener('change', function () {
-              filter.charaId = charaSelect.value;
-              if (host._reload) { host._reload(); }
+          var statsSelect = host.querySelector('[data-pick-stats]');
+          if (statsSelect) {
+            statsSelect.addEventListener('change', function () {
+              filter.statsMode = statsSelect.value;
+              reload();
             });
           }
-          var rankSelect = host.querySelector('[data-pick-rank]');
-          if (rankSelect) {
-            rankSelect.addEventListener('change', function () {
-              filter.rank = rankSelect.value;
-              if (host._reload) { host._reload(); }
+          var keyword = host.querySelector('[data-pick-keyword]');
+          if (keyword) {
+            keyword.addEventListener('change', function () {
+              filter.keyword = keyword.value.trim();
+              reload();
             });
-          }
-          var typeSelect = host.querySelector('[data-pick-type]');
-          if (typeSelect) {
-            typeSelect.addEventListener('change', function () {
-              filter.type = typeSelect.value;
-              if (host._reload) { host._reload(); }
+            keyword.addEventListener('keydown', function (event) {
+              if (event.key === 'Enter') {
+                filter.keyword = keyword.value.trim();
+                reload();
+              }
             });
           }
           host.querySelectorAll('[data-add]').forEach(function (button, index) {
-            button.addEventListener('click', function (event) {
-              var tileEl = button.closest('.tile');
-              var level = readInteger(tileEl.querySelector('[data-lv]'));
-              if (level === null) { event.preventDefault(); return; }
-              var lb = readInteger(tileEl.querySelector('[data-lb]'));
-              if (lb === null) { event.preventDefault(); return; }
-              edit([{ op: 'piece.add', pieceId: rows[index].pieceId, level: level, lbCount: lb }]);
-            });
-          });
-          host.querySelectorAll('[data-preview]').forEach(function (button) {
             button.addEventListener('click', function () {
-              api('/api/view/piece-master?pieceId=' + encodeURIComponent(button.getAttribute('data-preview')))
-                .then(function (detail) {
-                  if (button.isConnected && $('modal').classList.contains('show')) {
-                    openPreview(detail.name || ('结晶 ' + detail.pieceId), piecePreviewHtml(detail), button);
-                  }
-                }).catch(fail);
+              var tileEl = button.closest('.tile');
+              var level = Math.floor(Number(tileEl.querySelector('[data-lv]').value || 1));
+              var lb = Math.floor(Number(tileEl.querySelector('[data-lb]').value || 0));
+              edit([{ op: 'piece.add', pieceId: rows[index].pieceId, level: level, lbCount: lb }]);
             });
           });
         }

@@ -1679,8 +1679,16 @@ class Editor:
             "statsAtMax": stats_max,
         }
 
+    def piece_skills(self, piece_id, lb_count=0):
+        """当前突破状态下生效的技能（满破 4 用第二个技能，否则第一个）。"""
+        detail = (self.pieces_detail_catalog().get("pieces") or {}).get(str(piece_id)) or {}
+        skills = detail.get("skills") or []
+        index = 1 if int(lb_count or 0) >= 4 else 0
+        active = skills[index] if index < len(skills) else (skills[0] if skills else None)
+        return active, skills, index
+
     def pieces_view(self, query=None, offset=0, limit=200, rank=None, piece_type=None,
-                    limit_mode=None, chara_id=None):
+                    limit_mode=None, chara_id=None, sort=None, keyword=None):
         rows = []
         index = self.deck_index()
         for row in self.rows("userPieceList"):
@@ -1695,6 +1703,7 @@ class Editor:
                     cap = None
             detail = (self.pieces_detail_catalog().get("pieces") or {}).get(str(piece_id)) or {}
             limit_ids = detail.get("limitCharaIds") or []
+            active, skills, skill_index = self.piece_skills(piece_id, row.get("lbCount") or 0)
             rows.append({
                 "id": row.get("id"),
                 "pieceId": piece_id,
@@ -1717,6 +1726,9 @@ class Editor:
                 "icon": "/assets/pieces/%s.png" % piece_id,
                 "editable": bool(master),
                 "decks": index.get(str(row.get("id")), []),
+                "activeSkill": active,
+                "activeSkillIndex": skill_index,
+                "skillNames": [skill.get("name") for skill in skills if skill.get("name")],
                 "path": "state.userPieceList[id=%s]" % row.get("id"),
             })
         ranks = sorted({row["rank"] for row in rows if row.get("rank")})
@@ -1725,6 +1737,13 @@ class Editor:
             needle = query.lower()
             rows = [row for row in rows
                     if needle in str(row["pieceId"]) or needle in str(row["name"]).lower()]
+        if keyword:
+            needle = keyword.strip().lower()
+            rows = [row for row in rows if any(
+                needle in str(skill.get("name") or "").lower()
+                or needle in str(skill.get("description") or "").lower()
+                for skill in (row.get("activeSkill"),)) or any(
+                needle in str(name or "").lower() for name in row.get("skillNames") or [])]
         if rank:
             rows = [row for row in rows if str(row.get("rank")) == str(rank)]
         if piece_type:
@@ -1737,7 +1756,12 @@ class Editor:
             rows = [row for row in rows
                     if not row.get("limitCharaIds")
                     or str(chara_id) in [str(item) for item in row["limitCharaIds"]]]
-        rows.sort(key=lambda row: (row.get("pieceId") or 0))
+        if sort in ("hp", "attack", "defense"):
+            rows.sort(key=lambda row: (-(row.get(sort) or 0), row.get("pieceId") or 0))
+        elif sort == "level":
+            rows.sort(key=lambda row: (-(row.get("level") or 0), row.get("pieceId") or 0))
+        else:
+            rows.sort(key=lambda row: (row.get("pieceId") or 0))
         return {"total": len(rows), "offset": offset, "limit": limit, "rows": rows[offset: offset + limit],
                 "ranks": ranks, "types": types}
 
@@ -2000,7 +2024,7 @@ class Editor:
         decks.sort(key=lambda item: (item["deckType"] if isinstance(item["deckType"], int) else 99))
         return {"decks": decks, "total": len(decks)}
     def piece_catalog(self, query=None, offset=0, limit=50, rank=None, piece_type=None,
-                      limit_mode=None, chara_id=None):
+                      limit_mode=None, chara_id=None, sort=None, keyword=None):
         """全部已实装记忆结晶（可添加）。结晶可重复获取，因此只报已有数量，不阻止再添加。"""
         owned_count = {}
         for row in self.rows("userPieceList"):
@@ -2029,6 +2053,13 @@ class Editor:
                 continue
             if chara_id and limit_ids and str(chara_id) not in [str(item) for item in limit_ids]:
                 continue
+            active, skills, skill_index = self.piece_skills(key, 0)
+            stats_lv1 = None
+            for level in (1,):
+                try:
+                    stats_lv1 = growth.piece_stats(master, level, 0)
+                except growth.GrowthError:
+                    stats_lv1 = None
             rows.append({
                 "pieceId": int(key) if key.isdigit() else key,
                 "name": name,
@@ -2041,6 +2072,11 @@ class Editor:
                 "ownedCount": owned_count.get(key, 0),
                 "addable": bool(master),
                 "base": master,
+                "statsLv1": stats_lv1,
+                "statsMax": None,
+                "maxLevel": None,
+                "activeSkill": active,
+                "skillNames": [skill.get("name") for skill in skills if skill.get("name")],
                 "icon": "/assets/pieces/%s.png" % key,
             })
         rows.sort(key=lambda row: (str(row.get("name")), str(row.get("pieceId"))))
@@ -2050,6 +2086,38 @@ class Editor:
                 return 0
             needle = query.lower()
             return 0 if str(item["pieceId"]) == needle else 1
+
+        # 满级数值：RANK 满破 4 时的上限等级
+        for item in rows:
+            master = item.get("master") or self.masters.piece(item["pieceId"])
+            if not master:
+                continue
+            try:
+                cap = growth.piece_max_level(master.get("rank"), 4)
+                item["maxLevel"] = cap
+                item["statsMax"] = growth.piece_stats(master, cap, 4)
+            except growth.GrowthError:
+                item["maxLevel"] = None
+                item["statsMax"] = None
+            item.pop("master", None)
+
+        if keyword:
+            needle = keyword.strip().lower()
+            rows = [item for item in rows if any(
+                needle in str(skill.get("name") or "").lower()
+                or needle in str(skill.get("description") or "").lower()
+                for skill in [item.get("activeSkill")] if isinstance(skill, dict))
+                or any(needle in str(name or "").lower() for name in item.get("skillNames") or [])]
+        if sort in ("hp", "attack", "defense"):
+            field = sort
+
+            def value(item):
+                stats = item.get("statsMax") or item.get("statsLv1") or {}
+                return -(int(stats.get(field) or 0))
+
+            rows.sort(key=lambda item: (value(item), str(item.get("pieceId"))))
+        elif sort == "level":
+            rows.sort(key=lambda item: (-(int(item.get("maxLevel") or 0)), str(item.get("pieceId"))))
 
         ranks = sorted({str(item["rank"]) for item in rows if item.get("rank")})
         types = sorted({str(item["type"]) for item in rows if item.get("type")})
@@ -4158,11 +4226,17 @@ class Editor:
         key_b, member_b = locate(op.get("b"))
         if key_a == key_b:
             raise ValidationError("同一个位置不用换", code="invalid_value")
-        for member in (member_a, member_b):
-            if member is not None and not deck.get("userCardId%d" % member):
-                raise ValidationError("第 %s 位还没有角色" % member,
-                                      code="deck_member_missing")
-        value_a, value_b = deck.get(key_a), deck.get(key_b)
+        # 位置互换：只要两边至少一边有角色就允许，另一边是空位时相当于「把角色挪进空位」
+        filled = [member for member in (member_a, member_b)
+                  if member is not None and deck.get("userCardId%d" % member)]
+        if not filled:
+            raise ValidationError("这两位都没有角色", code="deck_member_missing")
+        if member_a is not None and member_a not in filled and deck.get(key_a) is None:
+            raise ValidationError("第 %s 位还没有角色" % member_a, code="deck_member_missing")
+        value_b = deck.get(key_b)
+        if member_b is not None and member_b not in filled and value_b is None:
+            raise ValidationError("第 %s 位还没有角色" % member_b, code="deck_member_missing")
+        value_a = deck.get(key_a)
         deck[key_a], deck[key_b] = value_b, value_a
         extra.add("state.userDeckList[deckType=%s]" % deck.get("deckType"))
 
