@@ -560,9 +560,15 @@
     }
   }
 
+  var cancelPickerRead = null;
+  function resetPickerRead() {
+    if (cancelPickerRead) { cancelPickerRead(); cancelPickerRead = null; }
+  }
+
   function closeModal() {
     var host = $('modal');
     if (!host.classList.contains('show')) { return; }
+    resetPickerRead();
     host.classList.remove('show');
     syncDialogLayer();
     if (!focusInView(pickerOpener)) { focusInView(document.querySelector('#tabs .active')); }
@@ -592,10 +598,29 @@
 
   /* config: { title, placeholder, load(q), meta(data), render(rows), bind(host, rows) } */
   function openPicker(config) {
+    resetPickerRead();
     openModal(config.title, config.placeholder, config.search !== false);
-    function load(query) {
+    var generation = 0, timer = null, active = true;
+    cancelPickerRead = function () {
+      active = false;
+      clearTimeout(timer);
+      $('modalBody')._reload = null;
+    };
+    function search(delay) {
+      if (!active) { return; }
+      var request = ++generation, query = $('modalSearch').value.trim();
+      clearTimeout(timer);
+      // A changed query invalidates the old Add buttons even during debounce.
+      $('modalMeta').textContent = '';
       $('modalBody').innerHTML = '<div class="empty">加载中…</div>';
+      if (delay) { timer = setTimeout(function () { load(query, request); }, delay); }
+      else { load(query, request); }
+    }
+    function current(request) { return active && request === generation; }
+    function load(query, request) {
+      if (!current(request)) { return; }
       config.load(query).then(function (data) {
+        if (!current(request)) { return; }
         $('modalMeta').textContent = config.meta ? config.meta(data) : '';
         var rows = (data && data.rows) || [];
         if (!rows.length) {
@@ -605,17 +630,13 @@
         $('modalBody').innerHTML = config.render(rows, data);
         if (config.bind) { config.bind($('modalBody'), rows, data); }
       }).catch(function (error) {
+        if (!current(request)) { return; }
         $('modalBody').innerHTML = '<div class="empty">加载失败：' + esc(error.message) + '</div>';
       });
     }
-    var timer = null;
-    $('modalSearch').oninput = function () {
-      if (timer) { clearTimeout(timer); }
-      timer = setTimeout(function () { load($('modalSearch').value.trim()); }, 240);
-    };
-    load('');
-    // 弹窗内部的筛选控件靠这个重新拉数据（不关闭弹窗）
-    $('modalBody')._reload = function () { load($('modalSearch').value.trim()); };
+    $('modalSearch').oninput = function () { search(240); };
+    $('modalBody')._reload = function () { search(0); };
+    search(0);
   }
 
   function tileHtml(icon, name, idText, bodyHtml, tagsHtml) {
