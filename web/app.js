@@ -600,7 +600,7 @@
   function openPicker(config) {
     resetPickerRead();
     openModal(config.title, config.placeholder, config.search !== false);
-    var generation = 0, timer = null, active = true;
+    var generation = 0, timer = null, active = true, offset = 0, focusPage = false;
     cancelPickerRead = function () {
       active = false;
       clearTimeout(timer);
@@ -619,7 +619,7 @@
     function current(request) { return active && request === generation; }
     function load(query, request) {
       if (!current(request)) { return; }
-      config.load(query).then(function (data) {
+      config.load(query, offset, config.pageSize).then(function (data) {
         if (!current(request)) { return; }
         $('modalMeta').textContent = config.meta ? config.meta(data) : '';
         var rows = (data && data.rows) || [];
@@ -628,14 +628,32 @@
           return;
         }
         $('modalBody').innerHTML = config.render(rows, data);
+        if (config.pageSize && data.total > config.pageSize) {
+          var pages = Math.ceil(data.total / config.pageSize), options = '';
+          for (var p = 0; p < pages; p++) {
+            var start = p * config.pageSize;
+            options += '<option value="' + start + '"' + (start === data.offset ? ' selected' : '')
+              + '>第 ' + (p + 1) + ' / ' + pages + ' 页</option>';
+          }
+          var body = $('modalBody');
+          body.insertAdjacentHTML('afterbegin', '<div class="toolbar"><label>页码 <select data-roster-page>'
+            + options + '</select></label></div>');
+          var page = body.querySelector('[data-roster-page]');
+          if (focusPage) { body.scrollTop = 0; page.focus(); focusPage = false; }
+          page.addEventListener('change', function () {
+            offset = Number(page.value); focusPage = true; search(0);
+          });
+        }
         if (config.bind) { config.bind($('modalBody'), rows, data); }
       }).catch(function (error) {
         if (!current(request)) { return; }
         $('modalBody').innerHTML = '<div class="empty">加载失败：' + esc(error.message) + '</div>';
       });
     }
-    $('modalSearch').oninput = function () { search(240); };
-    $('modalBody')._reload = function () { search(0); };
+    // Search and filter changes start a new result set; a page choice alone keeps the offset.
+    function restart(delay) { offset = 0; focusPage = false; search(delay); }
+    $('modalSearch').oninput = function () { restart(240); };
+    $('modalBody')._reload = function () { restart(0); };
     search(0);
   }
 
@@ -898,8 +916,11 @@
   function openCharaPicker() {
     openPicker({
       title: '添加魔法少女',
-      placeholder: '搜索角色名称（已实装 231 名）',
-      load: function (q) { return api('/api/view/chara-catalog?limit=120&q=' + encodeURIComponent(q)); },
+      placeholder: '搜索已实装角色的名称或编号',
+      pageSize: 120,
+      load: function (q, offset, limit) {
+        return api('/api/view/chara-catalog?limit=' + limit + '&offset=' + offset + '&q=' + encodeURIComponent(q));
+      },
       meta: function (data) { return '匹配 ' + data.total + ' 名'; },
       render: function (rows) {
         var html = '<div class="grid wide">';
@@ -2466,7 +2487,10 @@ function renderCharaDetail() {
     openPicker({
       title: '选择上阵角色（第 ' + slot + ' 位）',
       placeholder: '搜索角色或卡名',
-      load: function (q) { return api('/api/view/charas?limit=200&q=' + encodeURIComponent(q)); },
+      pageSize: 200,
+      load: function (q, offset, limit) {
+        return api('/api/view/charas?limit=' + limit + '&offset=' + offset + '&q=' + encodeURIComponent(q));
+      },
       meta: function (data) { return '已拥有 ' + data.total + ' 名'; },
       render: function (rows) {
         var html = '<div class="grid wide">';
@@ -2496,8 +2520,10 @@ function renderCharaDetail() {
     openPicker({
       title: '给第 ' + member + ' 位（槽 ' + slot + '）选择记忆结晶',
       placeholder: '搜索结晶名称',
-      load: function (q) {
-        return api('/api/view/pieces?limit=200&q=' + encodeURIComponent(q)
+      pageSize: 200,
+      renderEmpty: true,
+      load: function (q, offset, limit) {
+        return api('/api/view/pieces?limit=' + limit + '&offset=' + offset + '&q=' + encodeURIComponent(q)
           + '&rank=' + encodeURIComponent(filter.rank)
           + '&type=' + encodeURIComponent(filter.type));
       },
@@ -2506,8 +2532,9 @@ function renderCharaDetail() {
         var html = '<div class="toolbar">'
           + '<select data-dp-rank>' + selectOptions(data.ranks || [], filter.rank) + '</select>'
           + '<select data-dp-type>' + selectOptions(data.types || [], filter.type, pieceTypeLabel) + '</select>'
-          + '<span class="small">' + rows.length + ' 枚</span></div>'
-          + '<div class="grid wide">';
+          + '<span class="small">本页 ' + rows.length + ' 枚</span></div>';
+        if (!rows.length) { return html + '<div class="empty">没有匹配项</div>'; }
+        html += '<div class="grid wide">';
         rows.forEach(function (row) {
           html += '<div class="tile">' + thumb(row.icon, row.name, 'icon')
             + '<div class="name">' + esc(row.name) + '</div>'
