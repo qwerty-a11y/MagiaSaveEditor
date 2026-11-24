@@ -1688,7 +1688,7 @@ class Editor:
         return active, skills, index
 
     def pieces_view(self, query=None, offset=0, limit=200, rank=None, piece_type=None,
-                    limit_mode=None, chara_id=None, sort=None, keyword=None):
+                    limit_mode=None, chara_id=None, sort=None, keyword=None, order=None):
         rows = []
         index = self.deck_index()
         for row in self.rows("userPieceList"):
@@ -1705,6 +1705,8 @@ class Editor:
             limit_ids = detail.get("limitCharaIds") or []
             active, skills, skill_index = self.piece_skills(piece_id, row.get("lbCount") or 0)
             rows.append({
+                "skillTexts": [str(skill.get("description") or "") for skill in skills
+                               if skill.get("description")],
                 "id": row.get("id"),
                 "pieceId": piece_id,
                 "limitCharaIds": limit_ids,
@@ -1738,12 +1740,17 @@ class Editor:
             rows = [row for row in rows
                     if needle in str(row["pieceId"]) or needle in str(row["name"]).lower()]
         if keyword:
-            needle = keyword.strip().lower()
-            rows = [row for row in rows if any(
-                needle in str(skill.get("name") or "").lower()
-                or needle in str(skill.get("description") or "").lower()
-                for skill in (row.get("activeSkill"),)) or any(
-                needle in str(name or "").lower() for name in row.get("skillNames") or [])]
+            needles = [part for part in keyword.replace("＆", "&").split("&") if part.strip()]
+            needles = [part.strip().lower() for part in needles] or [keyword.strip().lower()]
+            def matches(row):
+                blob = " ".join([
+                    str((row.get("activeSkill") or {}).get("name") or ""),
+                    str((row.get("activeSkill") or {}).get("description") or ""),
+                    " ".join(str(name or "") for name in row.get("skillNames") or []),
+                    " ".join(str(text or "") for text in row.get("skillTexts") or []),
+                ]).lower()
+                return all(needle in blob for needle in needles)
+            rows = [row for row in rows if matches(row)]
         if rank:
             rows = [row for row in rows if str(row.get("rank")) == str(rank)]
         if piece_type:
@@ -1756,10 +1763,19 @@ class Editor:
             rows = [row for row in rows
                     if not row.get("limitCharaIds")
                     or str(chara_id) in [str(item) for item in row["limitCharaIds"]]]
+        desc = str(order or "desc").lower() != "asc"
         if sort in ("hp", "attack", "defense"):
-            rows.sort(key=lambda row: (-(row.get(sort) or 0), row.get("pieceId") or 0))
+            rows.sort(key=lambda row: ((row.get(sort) or 0) if not desc else -(row.get(sort) or 0),
+                                       row.get("pieceId") or 0))
         elif sort == "level":
-            rows.sort(key=lambda row: (-(row.get("level") or 0), row.get("pieceId") or 0))
+            rows.sort(key=lambda row: ((row.get("level") or 0) if not desc else -(row.get("level") or 0),
+                                       row.get("pieceId") or 0))
+        elif sort == "name":
+            rows.sort(key=lambda row: (str(row.get("name") or ""), row.get("pieceId") or 0),
+                      reverse=desc)
+        elif sort == "rank":
+            rows.sort(key=lambda row: (str(row.get("rank") or ""), row.get("pieceId") or 0),
+                      reverse=desc)
         else:
             rows.sort(key=lambda row: (row.get("pieceId") or 0))
         return {"total": len(rows), "offset": offset, "limit": limit, "rows": rows[offset: offset + limit],
@@ -2024,7 +2040,7 @@ class Editor:
         decks.sort(key=lambda item: (item["deckType"] if isinstance(item["deckType"], int) else 99))
         return {"decks": decks, "total": len(decks)}
     def piece_catalog(self, query=None, offset=0, limit=50, rank=None, piece_type=None,
-                      limit_mode=None, chara_id=None, sort=None, keyword=None):
+                      limit_mode=None, chara_id=None, sort=None, keyword=None, order=None):
         """全部已实装记忆结晶（可添加）。结晶可重复获取，因此只报已有数量，不阻止再添加。"""
         owned_count = {}
         for row in self.rows("userPieceList"):
@@ -2062,6 +2078,8 @@ class Editor:
                     stats_lv1 = None
             rows.append({
                 "pieceId": int(key) if key.isdigit() else key,
+                "skillTexts": [str(skill.get("description") or "") for skill in skills
+                               if skill.get("description")],
                 "name": name,
                 "limitCharaIds": limit_ids,
                 "limitCharaNames": [self.catalog.chara_name(cid) for cid in limit_ids],
@@ -2102,22 +2120,37 @@ class Editor:
             item.pop("master", None)
 
         if keyword:
-            needle = keyword.strip().lower()
-            rows = [item for item in rows if any(
-                needle in str(skill.get("name") or "").lower()
-                or needle in str(skill.get("description") or "").lower()
-                for skill in [item.get("activeSkill")] if isinstance(skill, dict))
-                or any(needle in str(name or "").lower() for name in item.get("skillNames") or [])]
+            needles = [part for part in keyword.replace("＆", "&").split("&") if part.strip()]
+            needles = [part.strip().lower() for part in needles] or [keyword.strip().lower()]
+            def matches(item):
+                blob = " ".join([
+                    str((item.get("activeSkill") or {}).get("name") or ""),
+                    str((item.get("activeSkill") or {}).get("description") or ""),
+                    " ".join(str(name or "") for name in item.get("skillNames") or []),
+                    " ".join(str(text or "") for text in item.get("skillTexts") or []),
+                ]).lower()
+                return all(needle in blob for needle in needles)
+            rows = [item for item in rows if matches(item)]
+        desc = str(order or "desc").lower() != "asc"
         if sort in ("hp", "attack", "defense"):
             field = sort
 
             def value(item):
                 stats = item.get("statsMax") or item.get("statsLv1") or {}
-                return -(int(stats.get(field) or 0))
+                number = int(stats.get(field) or 0)
+                return -number if desc else number
 
             rows.sort(key=lambda item: (value(item), str(item.get("pieceId"))))
         elif sort == "level":
-            rows.sort(key=lambda item: (-(int(item.get("maxLevel") or 0)), str(item.get("pieceId"))))
+            rows.sort(key=lambda item: (-(int(item.get("maxLevel") or 0))
+                                        if desc else int(item.get("maxLevel") or 0),
+                                        str(item.get("pieceId"))))
+        elif sort == "name":
+            rows.sort(key=lambda item: (str(item.get("name") or ""), str(item.get("pieceId"))),
+                      reverse=desc)
+        elif sort == "rank":
+            rows.sort(key=lambda item: (str(item.get("rank") or ""), str(item.get("pieceId"))),
+                      reverse=desc)
 
         ranks = sorted({str(item["rank"]) for item in rows if item.get("rank")})
         types = sorted({str(item["type"]) for item in rows if item.get("type")})

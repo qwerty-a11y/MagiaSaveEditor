@@ -248,7 +248,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"ok": True, **editor.pieces_view(text, offset, limit,
                                                          query.get("rank"), query.get("type"),
                                                          query.get("limitMode"), query.get("charaId"),
-                                                         query.get("sort"), query.get("keyword"))}
+                                                         query.get("sort"), query.get("keyword"),
+                                                         query.get("order"))}
             if name == "piece":
                 return {"ok": True, **editor.piece_detail(query.get("id"))}
             if name == "materials":
@@ -282,7 +283,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"ok": True, **editor.piece_catalog(text, offset, limit,
                                                            query.get("rank"), query.get("type"),
                                                            query.get("limitMode"), query.get("charaId"),
-                                                           query.get("sort"), query.get("keyword"))}
+                                                           query.get("sort"), query.get("keyword"),
+                                                           query.get("order"))}
             if name == "gifts-catalog":
                 return {"ok": True, **editor.gift_catalog(text, limit)}
             if name == "status":

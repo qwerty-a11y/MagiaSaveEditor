@@ -4,7 +4,7 @@
 
   var S = { status: null, tab: 'overview', page: {}, busy: false, piecePicker: null, charaSel: null, charaPanel: null,
     spiritSel: null, pieceSel: null, deckSel: null, chapterMap: null, sectionSel: null,
-    pieceFilter: { rank: '', type: '', limit: '', charaId: '', sort: '', keyword: '' },
+    pieceFilter: { rank: '', type: '', limit: '', charaId: '', sort: '', order: 'desc', keyword: '' },
     itemsNav: { family: null, group: null }, open: {} };
 
   var TABS = [
@@ -1639,6 +1639,7 @@ function renderCharaDetail() {
       + '&limitMode=' + encodeURIComponent(filter.limit || '')
       + '&charaId=' + encodeURIComponent(filter.charaId || '')
       + '&sort=' + encodeURIComponent(filter.sort || '')
+      + '&order=' + encodeURIComponent(filter.order || 'desc')
       + '&keyword=' + encodeURIComponent(filter.keyword || '');
     var charaPromise = api('/api/view/charas?limit=200').catch(function () { return { rows: [] }; });
     return Promise.all([api(url), charaPromise]).then(function (results) {
@@ -1660,6 +1661,7 @@ function renderCharaDetail() {
           }).join('')
         + '</select>'
         + pieceSortSelect(filter.sort)
+        + pieceOrderSelect(filter.order)
         + '<input type="text" data-keyword-filter placeholder="技能关键词" value="'
         + esc(filter.keyword || '') + '">'
         + '<button data-add>添加记忆结晶…</button>'
@@ -1678,8 +1680,8 @@ function renderCharaDetail() {
                 }).join('')
               + (row.decks || []).map(deckTagHtml).join('') + '</div>'
             : '')
-          + '<div class="row"><span class="tag">Lv ' + esc(row.level) + ' / ' + esc(row.maxLevel || '?') + '</span>'
-          + '<span class="tag">突破 ' + esc(row.lbCount) + ' / 4</span></div>'
+          + '<div class="lvLine"><span>Lv ' + esc(row.level) + ' / ' + esc(row.maxLevel || '?')
+          + '</span><span>突破 ' + esc(row.lbCount) + ' / 4</span></div>'
           + pieceStatsLine(row)
           + pieceSkillLine(row)
           + '</div>';
@@ -1708,6 +1710,14 @@ function renderCharaDetail() {
       if (sortSelect) {
         sortSelect.addEventListener('change', function () {
           filter.sort = sortSelect.value;
+          page.offset = 0;
+          render();
+        });
+      }
+      var orderSelect = $('main').querySelector('[data-piece-order]');
+      if (orderSelect) {
+        orderSelect.addEventListener('change', function () {
+          filter.order = orderSelect.value;
           page.offset = 0;
           render();
         });
@@ -1786,7 +1796,9 @@ function renderCharaDetail() {
           }).join('')
         + '</div></div></section>';
 
-      html += '<section class="panel"><h2>等级与突破 <span class="tag ok">可回退</span></h2>'
+      html += '<section class="panel"><h2>等级与突破 <span class="tag ok">可回退</span>'
+        + '<span class="spacer"></span><span class="small">Lv ' + esc(d.level) + ' / '
+        + esc(d.maxLevel || '?') + ' · 突破 ' + esc(d.lbCount) + ' / 4</span></h2>'
         + pieceFieldHtml('等级（上限 ' + (d.maxLevel || '?') + '）', 'level', d.level, d.editable, d.maxLevel || 50)
         + pieceFieldHtml('突破（0-4）', 'lbCount', d.lbCount, d.editable, 4)
         + '<p class="small">HP / 攻击 / 防御由等级与突破按游戏公式推算，不能直接改。</p>'
@@ -1923,7 +1935,7 @@ function renderCharaDetail() {
       html += '<div class="deckPiece" data-goto-piece="' + esc(piece.id) + '">'
         + thumb(piece.icon, piece.name, 'pieceMini')
         + '<span>' + esc(piece.name) + '</span>'
-        + '<span class="small pieceLv">Lv' + esc(piece.level) + ' 突' + esc(piece.lbCount) + '</span>'
+        + '<span class="small pieceLvText">Lv ' + esc(piece.level) + ' 突 ' + esc(piece.lbCount) + '</span>'
         + (deck.editable ? '<button class="mini" data-deck-piece-remove="1" data-slot="' + esc(piece.slot)
           + '">×</button>' : '') + '</div>';
     });
@@ -2469,7 +2481,7 @@ function renderCharaDetail() {
   }
 
   function openDeckPiecePicker(deckType, member, slot) {
-    var filter = { rank: '', type: '', limit: '', charaId: '', sort: '' };
+    var filter = { rank: '', type: '', limit: '', charaId: '', sort: '', order: 'desc' };
     openPicker({
       title: '给第 ' + member + ' 位（槽 ' + slot + '）选择记忆结晶',
       placeholder: '搜索结晶名称',
@@ -2479,7 +2491,8 @@ function renderCharaDetail() {
           + '&type=' + encodeURIComponent(filter.type)
           + '&limitMode=' + encodeURIComponent(filter.limit)
           + '&charaId=' + encodeURIComponent(filter.charaId)
-          + '&sort=' + encodeURIComponent(filter.sort));
+          + '&sort=' + encodeURIComponent(filter.sort)
+          + '&order=' + encodeURIComponent(filter.order || 'desc'));
       },
       meta: function (data) { return '已拥有 ' + data.total + ' 枚'; },
       render: function (rows, data) {
@@ -2499,6 +2512,7 @@ function renderCharaDetail() {
             }).join('')
           + '</select>'
           + pieceSortSelect(filter.sort)
+          + pieceOrderSelect(filter.order)
           + '<span class="small">' + rows.length + ' 枚</span></div>'
           + '<div class="grid wide">';
         rows.forEach(function (row) {
@@ -2538,6 +2552,13 @@ function renderCharaDetail() {
         if (dpSort) {
           dpSort.addEventListener('change', function () {
             filter.sort = dpSort.value;
+            if (host._reload) { host._reload(); }
+          });
+        }
+        var dpOrder = host.querySelector('[data-piece-order]');
+        if (dpOrder) {
+          dpOrder.addEventListener('change', function () {
+            filter.order = dpOrder.value;
             if (host._reload) { host._reload(); }
           });
         }
@@ -2614,12 +2635,13 @@ function renderCharaDetail() {
   function pieceSkillLine(row) {
     var skill = row.activeSkill;
     if (!skill) { return '<div class="small">（无技能数据）</div>'; }
-    var label = skill.name || ('技能 ' + skill.skillId);
-    if (row.lbCount !== undefined && row.lbCount !== null) {
-      label += (row.lbCount >= 4 ? '（满破）' : '（突破 ' + row.lbCount + '）');
+    // 外面直接显示具体效果（如「攻击力提升[Ⅴ] & 必定眩晕无效」），技能名放到 title
+    var text = skill.description || skill.name || ('技能 ' + skill.skillId);
+    var tip = [skill.name, skill.description].filter(Boolean).join(' — ');
+    if (row.lbCount !== undefined && row.lbCount !== null && Number(row.lbCount) >= 4) {
+      tip += '（满破技能）';
     }
-    return '<div class="small pieceSkill" title="' + esc(nl(skill.description)) + '">'
-      + esc(label) + '</div>';
+    return '<div class="small pieceSkill" title="' + esc(nl(tip)) + '">' + esc(nl(text)) + '</div>';
   }
 
   function pieceSortSelect(current) {
@@ -2632,8 +2654,17 @@ function renderCharaDetail() {
       + '</select>';
   }
 
+  function pieceOrderSelect(current) {
+    var value = current || 'desc';
+    return '<select data-piece-order>'
+      + '<option value="desc"' + (value === 'desc' ? ' selected' : '') + '>降序 ↓</option>'
+      + '<option value="asc"' + (value === 'asc' ? ' selected' : '') + '>升序 ↑</option>'
+      + '</select>';
+  }
+
   function openPiecePicker() {
-    var filter = { rank: '', type: '', limit: '', charaId: '', sort: '', keyword: '', statsMode: 'lv1' };
+    var filter = { rank: '', type: '', limit: '', charaId: '', sort: '', order: 'desc',
+      keyword: '', statsMode: 'lv1' };
     var charaOptions = S.charaOptions || [];
     function fetch(query) {
       return api('/api/view/pieces-catalog?limit=200&q=' + encodeURIComponent(query)
@@ -2642,6 +2673,7 @@ function renderCharaDetail() {
         + '&limitMode=' + encodeURIComponent(filter.limit)
         + '&charaId=' + encodeURIComponent(filter.charaId)
         + '&sort=' + encodeURIComponent(filter.sort)
+        + '&order=' + encodeURIComponent(filter.order || 'desc')
         + '&keyword=' + encodeURIComponent(filter.keyword));
     }
     var ready = charaOptions.length
@@ -2676,6 +2708,7 @@ function renderCharaDetail() {
               }).join('')
             + '</select>'
             + pieceSortSelect(filter.sort)
+            + pieceOrderSelect(filter.order)
             + '<input type="text" data-pick-keyword placeholder="技能关键词" value="'
             + esc(filter.keyword) + '">'
             + '<select data-pick-stats>'
@@ -2693,8 +2726,12 @@ function renderCharaDetail() {
                   + ' · 防 ' + fmt(stats.defense)
                   + (filter.statsMode === 'max' ? '（满级 Lv' + esc(row.maxLevel || '?') + '）' : '（1 级）')
                   + '</div>'
-                  + '<div class="small pieceSkill" title="' + esc(nl(row.activeSkill && row.activeSkill.description)) + '">'
-                  + esc(row.activeSkill ? (row.activeSkill.name || '') : '（无技能数据）') + '</div>'
+                  + '<div class="small pieceSkill" title="' + esc(nl(row.activeSkill
+                      ? [row.activeSkill.name, row.activeSkill.description].filter(Boolean).join(' — ')
+                      : '')) + '">'
+                  + esc(row.activeSkill
+                    ? (row.activeSkill.description || row.activeSkill.name || '')
+                    : '（无技能数据）') + '</div>'
                   + '<div class="row"><input data-lv type="number" min="1" value="1"><span class="small">lv</span>'
                   + '<input data-lb type="number" min="0" max="4" value="0"><span class="small">突</span></div>'
                   + '<div class="row"><button class="mini" data-add>添加</button></div>'
@@ -2721,6 +2758,13 @@ function renderCharaDetail() {
           if (sortSelect) {
             sortSelect.addEventListener('change', function () {
               filter.sort = sortSelect.value;
+              reload();
+            });
+          }
+          var orderSelect = host.querySelector('[data-piece-order]');
+          if (orderSelect) {
+            orderSelect.addEventListener('change', function () {
+              filter.order = orderSelect.value;
               reload();
             });
           }
