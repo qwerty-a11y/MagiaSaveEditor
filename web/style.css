@@ -161,7 +161,16 @@ pre.json {
 .toast.ok { border-color: var(--ok); }
 
 section.panel { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
-section.panel h2 { margin: 0 0 12px; font-size: 14px; }
+section.panel h2 {
+  margin: 0 0 12px; font-size: 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+/* 面板内容若是 .kvList（有 920px 上限），标题也限同样宽度，
+   标题右侧的按钮 / 状态才能和数值行右边界对齐；其他面板保持整行宽。 */
+section.panel:has(> .kvList) > h2 { max-width: 920px; }
+section.panel h2 .spacer { flex: 1 1 auto; }
+section.panel h2 > *:last-child { margin-left: auto; }
+section.panel h2 .spacer + * { margin-left: 0; }
 /* .small 默认是辅助说明（灰）；带 .info 的是主要信息（用正文白） */
 .small { color: var(--muted); font-size: 12px; }
 .small.info, .small.pieceStats, .small.pieceLvText { color: var(--text); }
@@ -691,3 +700,138 @@ button.mini.star:hover { opacity: 1; border-color: #ffd479; }
 /* ---- 等级 / 突破：主要信息，用正文白色 ---- */
 .lvLine { display: flex; gap: 12px; margin: 3px 0 1px; font-size: 12.5px; color: var(--text); }
 .pieceLvText { color: var(--text); white-space: nowrap; }
+/* ---- 时间线日历弹窗：照游戏 overlay 的 calendar-layout（左日历 / 右列表） ---- */
+#timelineModal .panel { width: min(1080px, 96vw); height: min(82vh, 800px); }
+.tlCal { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 14px; min-height: 0; flex: 1 1 auto; }
+.tlDate { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto; padding-right: 4px; border-right: 1px solid var(--line); }
+.tlMonthNav { display: grid; grid-template-columns: 28px minmax(0, 1fr) 28px; gap: 4px; align-items: center; }
+.tlMonthLabel { font-size: 12px; font-weight: 600; }
+.tlAll {
+  padding: 5px 8px; font-size: 11.5px; cursor: pointer; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg-2); color: var(--text);
+}
+.tlAll:hover { border-color: var(--accent); }
+.tlYears, .tlMonths { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.tlCell {
+  padding: 5px 2px; font-size: 11px; cursor: pointer; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--bg-2); color: var(--text);
+}
+.tlCell.on { background: #2b2213; border-color: #ffd479; color: #ffd479; font-weight: 600; }
+.tlWeek, .tlDays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.tlWeek { font-size: 10.5px; text-align: center; color: var(--muted); margin: 6px 0 2px; }
+.tlDay {
+  height: 26px; font-size: 11.5px; cursor: pointer; border-radius: 6px;
+  border: 1px solid transparent; background: var(--bg-2); color: var(--text);
+}
+.tlDay.has { border-color: rgba(180, 108, 255, .55); }
+.tlDay.on { background: #2b2213; border-color: #ffd479; color: #ffd479; font-weight: 600; }
+.tlBlank { height: 26px; }
+.tlBlankWide { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); text-align: center; padding: 10px 0; }
+.tlPicked { margin-top: 6px; font-size: 11.5px; display: flex; gap: 8px; align-items: baseline; }
+.tlPicked span { color: var(--muted); }
+.tlLibrary { display: flex; flex-direction: column; min-height: 0; }
+/* 左栏（日历）容器：与列表行的 .tlDate 区分 */
+.tlDatePanel {
+  display: flex; flex-direction: column; gap: 6px; min-height: 0;
+  overflow-y: auto; padding-right: 4px; border-right: 1px solid var(--line);
+}
+/* ---- 道具页两个浏览模式（分类 / 时间线） ---- */
+.itemModes { display: flex; gap: 6px; margin: 0 0 10px; }
+.itemMode {
+  padding: 6px 14px; border-radius: 9px; cursor: pointer; font-size: 12.5px;
+  border: 1px solid var(--line); background: var(--bg-2); color: var(--text);
+}
+.itemMode:hover { border-color: var(--accent); }
+.itemMode.active { background: #2b2213; border-color: #ffd479; color: #ffd479; font-weight: 600; }
+.tlYearBlock { margin-bottom: 14px; }
+.tlYearBlock h3 { margin: 0 0 8px; font-size: 13px; }
+/* ---- 日期/年月格：清掉全局 button 的 padding，按网格列宽铺满 ---- */
+.tlDays > button.tlDay,
+.tlYears > button.tlCell,
+.tlMonths > button.tlCell {
+  padding: 0; min-width: 0; width: 100%; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
+}
+.tlWeek { grid-auto-flow: column; }
+.tlWeek > span { display: block; text-align: center; min-width: 0; }
+.tlBlank { min-width: 0; }
+/* ---- 时间线列表行：日期单行、标题一行、元信息一行 ---- */
+.tlList { flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
+.tlRow {
+  display: grid; grid-template-columns: 132px minmax(0, 1fr) auto;
+  gap: 10px; align-items: center; width: 100%; text-align: left; cursor: pointer;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg-2); color: var(--text);
+}
+.tlRow:hover { border-color: var(--accent); background: rgba(180, 108, 255, .08); }
+.tlRow.active { border-color: #ffd479; }
+.tlRow > .tlDate {
+  display: block; font-size: 11.5px; line-height: 1.3; color: var(--text);
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border: 0; padding: 0; min-height: 0; overflow-y: visible;
+}
+.tlRow > .tlInfo { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.tlRow > .tlInfo b { font-size: 13px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tlMeta { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+.tlRow > .tlGo { justify-self: end; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+/* ---- 道具页常驻操作栏（分类 / 时间线 + 时间线快捷操作） ---- */
+.itemBar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 5;
+  margin: 0 0 10px; padding: 8px 10px;
+  background: rgba(26, 22, 34, .96); border: 1px solid var(--line); border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+.itemBarModes { display: flex; gap: 6px; }
+/* ---- 两层操作栏：一级选项卡；二级只属于时间线浏览 ---- */
+.itemBar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 6;
+  margin: 0 0 6px; padding: 8px 10px;
+  background: rgba(26, 22, 34, .97); border: 1px solid var(--line); border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+.itemBarModes { display: flex; gap: 6px; }
+.itemSubBar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  position: sticky; top: 52px; z-index: 5;
+  margin: 0 0 12px; padding: 6px 10px 6px 16px;
+  background: rgba(32, 27, 41, .96); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 8px;
+}
+.subBarLabel { font-size: 11.5px; color: var(--muted); letter-spacing: .04em; }
+.subBarPath { font-size: 11.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.itemSubBar button.active { background: #2b2213; border-color: #ffd479; color: #ffd479; }
+/* ---- 时间线列表行改为两行：标题 / 日期 + 元信息 ---- */
+.tlRow {
+  display: flex; flex-direction: column; gap: 4px; align-items: stretch;
+  width: 100%; text-align: left; cursor: pointer; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg-2); color: var(--text);
+}
+.tlHead { display: flex; align-items: center; gap: 8px; }
+.tlHead b { font-size: 13px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tlRow > .tlHead > .tlGo { margin-left: auto; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.tlRow > .tlInfo { display: none; }
+.tlMeta { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.tlMeta .tlDate {
+  display: inline; border: 0; padding: 0; min-height: 0; overflow: visible;
+  font-size: 11.5px; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* 道具卡片：来源标签 + 悬浮提示 */
+.tile.hasTip { position: relative; }
+.tile.hasTip:hover { border-color: var(--accent); }
+.tile .tag.src { opacity: .75; }
+/* 白板数值编辑：输入框 + 应用 + 加成标注 */
+.statEdit { display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.statEdit input { width: 96px; text-align: right; }
+/* 数字输入框的取值跨度都很大（数量 / 等级 / 经验 / 数值），±1 步进没有意义，全局去掉 spin 按钮 */
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+.statEdit .plus { font-style: normal; font-size: 11.5px; color: var(--muted); }
+.statEdit .drift { font-style: normal; font-size: 11.5px; color: #ffd479; }
+/* ---- 弹窗头部：spacer 撑开，关闭按钮统一最右侧 ---- */
+.modal .head .spacer { flex: 1 1 auto; min-width: 0; }
+.modal .head > *:last-child { margin-left: auto; }
+.modal .head .spacer + * { margin-left: 0; }

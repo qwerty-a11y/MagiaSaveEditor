@@ -232,13 +232,17 @@ class Handler(BaseHTTPRequestHandler):
                 return {"ok": True, **editor.items_view(text, offset, limit,
                                                         query.get("sort") or "id",
                                                         query.get("group"), query.get("family"),
-                                                        query.get("scope") or "player")}
+                                                        query.get("scope") or "player",
+                                                        query.get("codes"))}
             if name == "chara":
                 return {"ok": True, **editor.chara_detail(query.get("userCardId"), query.get("charaId"))}
             if name == "chara-catalog":
                 return {"ok": True, **editor.chara_catalog(text, offset, limit)}
             if name == "items-families":
                 return {"ok": True, **editor.item_families(query.get("scope") or "player")}
+            if name == "items-timelines":
+                return {"ok": True, **editor.item_timelines_view(
+                    query.get("year"), query.get("family"), query.get("scope") or "player")}
             if name == "items-groups":
                 return {"ok": True, **editor.item_groups(query.get("family"),
                                                          query.get("scope") or "player")}

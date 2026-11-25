@@ -43,6 +43,13 @@ def main(argv=None):
     items = load_json(os.path.join(libs, "itemList.json"))
     shops = load_json(os.path.join(libs, "shopItemList.json"))
     codes = {row["itemCode"]: row for row in items if row.get("itemCode")}
+    # catalog 里还有 MCATBIN1 独有、itemList 未收录的活动交换品（如 EVENT_TRAINING_1001），
+    # 不纳入就会在 scope=player 过滤时被整条丢掉。
+    catalog_path = os.path.join(ROOT, "data", "catalog.json")
+    if os.path.isfile(catalog_path):
+        for code in load_json(catalog_path).get("items") or {}:
+            if code not in codes:
+                codes[code] = {"itemCode": code}
     icons = {os.path.splitext(name)[0] for name in os.listdir(args.assets)}
 
     evidence = {code: set() for code in codes}

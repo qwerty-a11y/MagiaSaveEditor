@@ -433,6 +433,80 @@ class Editor:
         rows.sort(key=lambda item: (item["order"], item["label"]))
         return {"families": rows, "totalItems": sum(item["itemCount"] for item in rows), "scope": scope}
 
+    def item_timeline(self):
+        """道具的时间线索引（tools/build_item_timeline.py 生成）。"""
+        if getattr(self, "_item_timeline_cache", None) is None:
+            path = os.path.join(_DATA_DIR, "item-timeline.json")
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    self._item_timeline_cache = json.load(handle)
+            except Exception:
+                self._item_timeline_cache = {"timelines": [], "items": {}, "counts": {}}
+        return self._item_timeline_cache
+
+    def item_timeline_entry(self, code):
+        """单个道具的来源：常驻 / 来自某活动（带起止日期）；无时间线数据则返回 None。"""
+        data = self.item_timeline()
+        entry = (data.get("items") or {}).get(str(code))
+        if not entry:
+            return None
+        labels = getattr(self, "_timeline_label_cache", None)
+        if labels is None:
+            labels = {row.get("key"): row.get("label") for row in (data.get("timelines") or [])}
+            self._timeline_label_cache = labels
+        label = labels.get(entry.get("timelineKey")) or entry.get("activityName")
+        return {
+            "key": entry.get("timelineKey"),
+            "start": entry.get("start"),
+            "end": entry.get("end"),
+            "label": label or ((entry.get("familyKey") or "") + " " + str(entry.get("activityId"))),
+            "basis": entry.get("basis"),
+        }
+
+    def item_timelines_view(self, year=None, family=None, scope="player"):
+        """按时间线浏览道具：每个活动窗口一段，按开始日期排序。"""
+        data = self.item_timeline()
+        timelines = data.get("timelines") or []
+        visible = None
+        if scope == "player":
+            visible = {code for code, info in (self.item_visibility().get("items") or {}).items()
+                       if info.get("scope") == "player"}
+        rows = []
+        for entry in timelines:
+            if year and entry.get("year") != str(year):
+                continue
+            if family and entry.get("familyKey") != family:
+                continue
+            codes = [code for code in entry.get("items") or []
+                     if visible is None or code in visible]
+            if not codes:
+                continue
+            rows.append({
+                "key": entry.get("key"),
+                "familyKey": entry.get("familyKey"),
+                "activityId": entry.get("activityId"),
+                "label": entry.get("label"),
+                "start": entry.get("start"),
+                "end": entry.get("end"),
+                "year": entry.get("year"),
+                "basis": entry.get("basis"),
+                "itemCount": len(codes),
+                "items": codes,
+                "shops": entry.get("shops") or [],
+            })
+        rows.sort(key=lambda row: (row["start"], row["familyKey"]))
+        years = sorted({entry.get("year") for entry in timelines if entry.get("year")})
+        families = sorted({entry.get("familyKey") for entry in timelines if entry.get("familyKey")})
+        counts = dict(data.get("counts") or {})
+        names = {}
+        for row in rows:
+            for code in row["items"]:
+                if code not in names:
+                    names[code] = self.catalog.item_name(code)
+        return {"rows": rows, "total": len(rows), "years": years, "families": families,
+                "countedItems": sum(row["itemCount"] for row in rows), "counts": counts,
+                "names": names, "scope": scope}
+
     def item_groups(self, family=None, scope="player"):
         """二级分类：某类型下的活动（活动号 + 官方活动名）。"""
         layout = self.item_layout()
@@ -454,15 +528,22 @@ class Editor:
         rows = sorted(groups.values(), key=lambda item: (item["order"], item["label"]))
         return {"groups": rows, "total": len(rows)}
 
-    def items_view(self, query=None, offset=0, limit=200, sort="id", group=None, family=None, scope="player"):
+    def items_view(self, query=None, offset=0, limit=200, sort="id", group=None, family=None, scope="player", codes=None):
         """全部已实装道具（不只已拥有的）：未拥有显示数量 0；可按活动分组过滤。"""
         owned = {}
         for row in self.rows("userItemList"):
             owned[str(row.get("itemId"))] = row
         layout = self.item_layout().get("items") or {}
-        codes = set(self.catalog.data["items"].keys()) | set(owned.keys())
+        wanted = None
+        if codes:
+            if isinstance(codes, str):
+                wanted = {part.strip() for part in codes.split(",") if part.strip()}
+            else:
+                wanted = {str(part) for part in codes}
+        all_codes = set(self.catalog.data["items"].keys()) | set(owned.keys())
+        codes_set = (all_codes & wanted) if wanted else all_codes
         rows = []
-        for code in codes:
+        for code in codes_set:
             info = layout.get(str(code)) or {"familyKey": "general", "groupKey": "general:other",
                                              "groupLabel": "其他 / 未分类", "familyLabel": "通用 / 系统"}
             if group and info.get("groupKey") != group:
@@ -490,6 +571,7 @@ class Editor:
                 "familyKey": info.get("familyKey"),
                 "familyLabel": info.get("familyLabel"),
                 "activityId": info.get("activityId"),
+                "timeline": self.item_timeline_entry(code),
             })
         if query:
             needle = query.lower()
@@ -852,6 +934,16 @@ class Editor:
 
     # ------------------------------------------------------------ 属性强化
 
+    def _computed_card_stats(self, card, master):
+        """按等级与成长曲线推算的白板数值（battle.js 用的 card.* 应等于它）。"""
+        if not card or not master:
+            return None
+        try:
+            stats = growth.card_stats(master, int(card.get("level") or 1))
+        except growth.GrowthError:
+            return None
+        return {"hp": stats.get("hp"), "attack": stats.get("attack"), "defense": stats.get("defense")}
+
     def chara_detail(self, user_card_id=None, chara_id=None):
         """二级界面：一个魔法少女的全部养成参数（可编辑项 + 只读推算项）。"""
         chara_row = None
@@ -920,6 +1012,10 @@ class Editor:
                 "addendAccelBonus": chara_row.get("addendAccelBonus"),
                 "addendBlastBonus": chara_row.get("addendBlastBonus"),
                 "addendChargeBonus": chara_row.get("addendChargeBonus"),
+                # 属性强化：userStatusList 里 <ATTR>_HP/_ATTACK/_DEFENSE 按同属性角色数放大后的实际加成
+                "attributeBonus": self.attribute_bonus(meta.get("attribute")),
+                # 白板推算值：等级 + 成长曲线算出来的「应该是多少」，用于一键还原
+                "computedStats": self._computed_card_stats(card, master),
             },
             "card": None if card is None else {
                 "id": card.get("id"),
@@ -3737,9 +3833,11 @@ class Editor:
         card = self._find_card(profile, op)
         field = op.get("field")
         if field in ("attack", "defense", "hp"):
-            raise ValidationError(
-                "attack/defense/hp 由等级推算，不能直接改；请改 level 或 experience",
-                code="stat_readonly")
+            # 游戏内 battle.js 对 card.* 只做非负整数与非零校验，不比对等级推算值，
+            # 所以这里允许直接写；要恢复成推算值用 card.restoreStats。
+            card[field] = _int(op.get("value"), field, 1, 2 ** 53 - 1)
+            extra.add("state.userCardList[id=%s].%s" % (card.get("id"), field))
+            return
         if field not in ("level", "experience", "magiaLevel", "revision", "displayCardId", "enabled",
                          "customized1", "customized2", "customized3", "customized4",
                          "customized5", "customized6"):
@@ -3777,6 +3875,27 @@ class Editor:
             card["experience"] = _int(op.get("value"), "experience", 0, max(0, cap - 1) if cap else 0)
         for key in ("level", "experience", "attack", "defense", "hp"):
             extra.add("state.userCardList[id=%s].%s" % (card.get("id"), key))
+
+    def _op_card_restoreStats(self, profile, op, _force, extra):
+        """一键还原白板：按当前等级与成长曲线重算 attack/defense/hp。"""
+        card = self._find_card(profile, op)
+        master = self.masters.card(card.get("cardId"))
+        if not master:
+            raise ValidationError("缺少卡片主数据: %s" % card.get("cardId"), code="path_missing")
+        computed = self._computed_card_stats(card, master)
+        if not computed:
+            raise ValidationError("无法按等级推算数值（等级或成长类型异常）", code="stat_restore_failed")
+        index = profile["state"]["userCardList"].index(card)
+        changed = []
+        for key in ("attack", "defense", "hp"):
+            value = computed.get(key)
+            if value is None:
+                continue
+            if card.get(key) != value:
+                card[key] = value
+                changed.append(key)
+                extra.add("state.userCardList[%d].%s" % (index, key))
+        return {"restored": bool(changed), "fields": changed, "stats": computed}
 
     def _op_card_set_all_levels(self, profile, op, _force, extra):
         level = _int(op.get("level"), "level", 1, 100)

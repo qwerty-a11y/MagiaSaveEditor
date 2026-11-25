@@ -61,13 +61,21 @@ def load_json(path):
         return json.load(handle)
 
 
+# 这些族的编号与 eventList 的 eventId 同一命名空间，可以直接查官方活动名；
+# 扭蛋 / 自选券等用的是 banner、券号命名空间，查 eventList 会串名。
+EVENT_NAMESPACED = {
+    "daily-tower", "tower", "single-raid", "group-battle", "branch", "training",
+    "witch", "arena", "dungeon", "raid", "accomplish", "compose-event", "event",
+}
+
+
 def classify(code, events):
     for pattern, family, family_label, order, prefix in RULES:
         match = re.match(pattern, code)
         if not match:
             continue
         number = int(match.group(1))
-        name = events.get(number)
+        name = events.get(number) if family in EVENT_NAMESPACED else None
         label = ("%s · %s" % (name, prefix)) if name else ("%s %d" % (prefix, number))
         return {
             "familyKey": family, "familyLabel": family_label, "familyOrder": order,
@@ -91,6 +99,18 @@ def main(argv=None):
     libs = os.path.abspath(args.libs)
     items = load_json(os.path.join(libs, "itemList.json"))
     events = {row["eventId"]: row["eventName"] for row in load_json(os.path.join(libs, "eventList.json"))}
+    # catalog 里可能还有 libs 未收录的活动交换品（来自 MCATBIN1），一并纳入分类
+    timeline_labels = {}
+    timeline_path = os.path.join(ROOT, "data", "item-timeline.json")
+    if os.path.isfile(timeline_path):
+        timeline_labels = load_json(timeline_path).get("labels") or {}
+
+    catalog_path = os.path.join(ROOT, "data", "catalog.json")
+    if os.path.isfile(catalog_path):
+        known = {row.get("itemCode") for row in items}
+        for code in load_json(catalog_path).get("items") or {}:
+            if code not in known:
+                items.append({"itemCode": code})
 
     result = {"items": {}, "groups": {}, "families": {}}
     for row in items:
@@ -98,11 +118,20 @@ def main(argv=None):
         if not code:
             continue
         info = classify(code, events)
+        # 时间线里有官方名的活动（扭蛋 / 魔女战 / 单人 Raid …），用它替换「族名 + 编号」
+        official = timeline_labels.get("%s:%s" % (info.get("familyKey"), info.get("activityId")))
+        if official:
+            info["activityName"] = official
+            info["groupLabel"] = official
         result["items"][code] = info
         family = result["families"].setdefault(info["familyKey"], {
             "label": info["familyLabel"], "order": info["familyOrder"], "itemCount": 0, "groupCount": 0})
         family["itemCount"] += 1
         group = result["groups"].get(info["groupKey"])
+        if group is not None:
+            official_label = timeline_labels.get("%s:%s" % (info.get("familyKey"), info.get("activityId")))
+            if official_label:
+                group["label"] = official_label
         if group is None:
             group = result["groups"][info["groupKey"]] = {
                 "family": info["familyKey"], "label": info["groupLabel"], "order": info["groupOrder"],

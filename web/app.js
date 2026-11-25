@@ -138,6 +138,15 @@
     } else if (S.tab === 'chapters' && S.chapterMap) {
       parts.push(encodeURIComponent(S.chapterMap));
       if (S.sectionSel) { parts.push(encodeURIComponent(S.sectionSel)); }
+    } else if (S.tab === 'items') {
+      var nav = S.itemsNav || {};
+      if (nav.itemMode === 'timeline') {
+        parts.push('timeline');
+        if (nav.timelineKey) { parts.push(encodeURIComponent(nav.timelineKey)); }
+      } else if (nav.family) {
+        parts.push('family', encodeURIComponent(nav.family));
+        if (nav.group) { parts.push(encodeURIComponent(nav.group)); }
+      }
     }
     return '#/' + parts.join('/');
   }
@@ -163,6 +172,20 @@
     S.deckSel = (tab === 'decks' && parts[1]) ? decodeURIComponent(parts[1]) : null;
     S.chapterMap = (tab === 'chapters' && parts[1]) ? decodeURIComponent(parts[1]) : null;
     S.sectionSel = (tab === 'chapters' && parts[2]) ? decodeURIComponent(parts[2]) : null;
+    if (tab === 'items') {
+      var mode = parts[1] || '';
+      if (mode === 'timeline') {
+        S.itemsNav = { family: null, group: null, itemMode: 'timeline',
+          scope: (S.itemsNav && S.itemsNav.scope) || 'player',
+          timelineKey: parts[2] ? decodeURIComponent(parts[2]) : null,
+          timelineItems: null, timelineNames: {}, timelineLabel: null };
+      } else if (mode === 'family') {
+        S.itemsNav = { family: parts[2] ? decodeURIComponent(parts[2]) : null,
+          group: parts[3] ? decodeURIComponent(parts[3]) : null,
+          scope: (S.itemsNav && S.itemsNav.scope) || 'player', itemMode: 'family' };
+      }
+      S.page.items = { offset: 0, q: '', sort: 'id' };
+    }
     SCROLL.key = null;
     SCROLL.y = 0;
     renderTabs();
@@ -714,15 +737,560 @@
   function renderItems() {
     var nav = S.itemsNav || (S.itemsNav = { family: null, group: null });
     if (nav.search) { return renderItemList(null); }
+    if (nav.timelineItems) { return renderTimelineItems(); }
+    if (nav.itemMode === "timeline") { return renderTimelineTab(); }
     if (!nav.family) { return renderItemFamilies(); }
     if (!nav.group) { return renderItemGroups(nav.family); }
     return renderItemList(nav.group);
   }
 
+  // 道具页常驻操作栏：两个浏览模式 + 时间线视图的快捷操作，任何层级都在
+  // 一级：浏览模式选项卡（分类 / 时间线），只放这两个
+  function itemActionBar(scope, mode) {
+    return '<div class="itemBar">'
+      + '<div class="itemBarModes">' + itemModeTabs(scope, mode) + '</div>'
+      + '</div>';
+  }
+
+  // 二级：时间线浏览自己的子操作栏（日历选择器是它的子功能）
+  function timelineSubBar(scope) {
+    var nav = S.itemsNav || {};
+    var html = '<div class="itemSubBar">'
+      + '<span class="subBarLabel">时间线</span>'
+      + '<button class="mini" data-bar-calendar>' + (nav.timelineItems ? '重新选择日期' : '按日期选择活动')
+      + '</button>'
+      + '<button class="mini' + (nav.timelineItems ? '' : ' active') + '" data-bar-timeline>全部活动</button>';
+    if (nav.timelineItems) {
+      html += '<span class="subBarPath">› ' + esc(nav.timelineLabel || nav.timelineKey || '') + '</span>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function bindItemActionBar(scope, pickerScope) {
+    var bar = $('main').querySelector('.itemBar');
+    if (!bar) { return; }
+    bindItemModes();
+    var sub = $('main').querySelector('.itemSubBar');
+    if (!sub) { return; }
+    var calendar = sub.querySelector('[data-bar-calendar]');
+    if (calendar) {
+      calendar.addEventListener('click', function () {
+        openTimelinePicker(function (row, names) {
+          if (!row) { return; }
+          S.itemsNav = { family: null, group: null, scope: pickerScope || 'all', itemMode: 'timeline',
+            timelineKey: row.key, timelineItems: row.items, timelineNames: names,
+            timelineLabel: row.label || row.key };
+          S.page.items = { offset: 0, q: '', sort: 'qty' };
+          render();
+        });
+      });
+    }
+    var overview = sub.querySelector('[data-bar-timeline]');
+    if (overview) {
+      overview.addEventListener('click', function () {
+        S.itemsNav = { family: null, group: null,
+          scope: (S.itemsNav && S.itemsNav.scope) || 'player', itemMode: 'timeline' };
+        S.page.items = { offset: 0, q: '', sort: 'id' };
+        render();
+      });
+    }
+  }
+
+  function itemModeTabs(scope, active) {
+    function tab(mode, label) {
+      return '<button class="itemMode' + (mode === active ? ' active' : '')
+        + '" data-item-mode="' + mode + '">' + esc(label) + '</button>';
+    }
+    return tab('family', '按分类浏览') + tab('timeline', '按时间线浏览');
+  }
+
+  function bindItemModes() {
+    $('main').querySelectorAll('[data-item-mode]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var mode = button.getAttribute('data-item-mode');
+        var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
+        S.itemsNav = { family: null, group: null, scope: scope, itemMode: mode };
+        S.page.items = { offset: 0, q: '', sort: 'id' };
+        render();
+      });
+    });
+  }
+
+  function renderTimelineTab() {
+    var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
+    var html = itemActionBar(scope, 'timeline') + timelineSubBar(scope)
+      + '<section class="panel"><h2>全部活动时间线'
+      + '<span class="spacer"></span><span class="small">点卡片直接看该活动的道具</span></h2>'
+      + '<div class="tlGrid" data-tl-grid><div class="empty">载入中…</div></div></section>';
+    $('main').innerHTML = html;
+    bindItemModes();
+    bindItemActionBar(scope);
+    return paintCurrent(api('/api/view/items-timelines?scope=' + scope), function (data) {
+      var grid = $('main').querySelector('[data-tl-grid]');
+      if (!grid) { return; }
+      if (!data.rows.length) {
+        grid.innerHTML = '<div class="empty">没有可用的时间线数据</div>';
+        return;
+      }
+      var byYear = {};
+      data.rows.forEach(function (row) {
+        var year = String(row.start).slice(0, 4);
+        (byYear[year] = byYear[year] || []).push(row);
+      });
+      var html = '';
+      Object.keys(byYear).sort().reverse().forEach(function (year) {
+        html += '<div class="tlYearBlock"><h3>' + esc(year) + ' 年 <span class="small">'
+          + byYear[year].length + ' 个活动</span></h3><div class="grid">';
+        byYear[year].forEach(function (row) {
+          html += '<div class="tile cat" data-tl-jump="' + esc(row.key) + '">'
+            + '<div class="name">' + esc(row.label || (itemFamilyLabel(row.familyKey) + ' ' + row.activityId))
+            + '</div><div class="id">' + esc(row.start) + ' → ' + esc(row.end || '')
+            + '</div>' + statLine([['道具', row.itemCount]]) + '</div>';
+        });
+        html += '</div></div>';
+      });
+      grid.innerHTML = html;
+      grid.querySelectorAll('[data-tl-jump]').forEach(function (tile) {
+        tile.addEventListener('click', function () {
+          var key = tile.getAttribute('data-tl-jump');
+          var row = data.rows.filter(function (item) { return item.key === key; })[0];
+          if (!row) { return; }
+          S.itemsNav = { family: null, group: null, scope: scope, itemMode: 'timeline',
+            timelineKey: row.key, timelineItems: row.items, timelineNames: data.names || {},
+            timelineLabel: row.label || row.key };
+          S.page.items = { offset: 0, q: '', sort: 'qty' };
+          render();
+        });
+      });
+    });
+  }
+
+  var ITEM_FAMILY_LABELS = {
+    'general': '通用 / 系统', 'daily-tower': '每日塔', 'tower': '活动塔',
+    'single-raid': '单人 Raid', 'group-battle': '集团战', 'branch': '分支活动',
+    'training': '养成活动', 'witch': '魔女战', 'arena': '竞技场',
+    'dungeon': '地牢活动', 'raid': 'Raid', 'accomplish': '达成活动',
+    'campaign': '推广活动', 'gacha': '扭蛋活动', 'home-event': '主页活动',
+    'selectable': '自选券活动'
+  };
+
+  function itemFamilyLabel(key) {
+    return ITEM_FAMILY_LABELS[key] || key;
+  }
+
+  function itemLabelOf(code) {
+    var table = (S.itemNames || (S.itemNames = {}));
+    return table[code] || code;
+  }
+
+  var TL_STATE = { rows: [], names: {}, years: [], families: [],
+    year: '', month: '', day: '', family: '', query: '', selected: null };
+
+  function tlPad(value) { return (value < 10 ? '0' : '') + value; }
+
+  function tlDaysInMonth(year, month) { return new Date(year, month, 0).getDate(); }
+
+  function tlDayHasActivity(state, year, month, day) {
+    if (!year || !month) { return false; }
+    var stamp = year + '/' + tlPad(month) + '/' + tlPad(day);
+    return state.rows.some(function (row) {
+      return row.start <= stamp && (row.end || row.start) >= stamp;
+    });
+  }
+
+  function openTimelinePicker(onPick) {
+    var state = TL_STATE;
+    state.onPick = onPick || null;
+    state.query = '';
+    state.selected = null;
+    state.day = '';
+    var host = document.createElement('div');
+    host.id = 'timelineModal';
+    host.className = 'modal show';
+    host.innerHTML = '<div class="panel" role="dialog" aria-modal="true">'
+      + '<div class="head"><strong>按时间线检索活动</strong>'
+      + '<span class="small" data-tl-range></span><span class="spacer"></span>'
+      + '<button class="ghost mini" data-tl-close>关闭</button></div>'
+      + '<div class="tlCal">'
+      + '<div class="tlDatePanel">'
+      + '<div class="tlMonthNav"><button class="mini" data-tl-prev>‹</button>'
+      + '<button class="mini tlMonthLabel" data-tl-ym></button>'
+      + '<button class="mini" data-tl-next>›</button></div>'
+      + '<button class="tlAll" data-tl-allyears>全部年份 · 全部活动</button>'
+      + '<div class="tlYears" data-tl-years></div>'
+      + '<button class="tlAll" data-tl-allmonths>本年全部月份</button>'
+      + '<div class="tlMonths" data-tl-months></div>'
+      + '<div class="tlWeek">' + ['一','二','三','四','五','六','日']     .map(function (d) { return '<span>' + d + '</span>'; }).join('') + '</div>'
+      + '<div class="tlDays" data-tl-days></div>'
+      + '<div class="tlPicked"><span>当前选中</span><b data-tl-picked>—</b></div>'
+      + '</div>'
+      + '<div class="tlLibrary">'
+      + '<div class="toolbar"><input type="text" data-tl-search placeholder="搜索活动名 / 活动号 / 道具名">'
+      + '<select data-tl-family><option value="">来源：全部</option></select>'
+      + '<span class="spacer"></span><span class="small" data-tl-count></span></div>'
+      + '<div class="tlList" data-tl-list><div class="empty">载入中…</div></div>'
+      + '</div></div></div>';
+    document.body.appendChild(host);
+
+    function close() {
+      if (host.parentNode) { host.parentNode.removeChild(host); }
+    }
+    host.addEventListener('click', function (event) {
+      if (event.target === host || event.target.closest('[data-tl-close]')) { close(); }
+    });
+    document.addEventListener('keydown', function handler(event) {
+      if (event.key === 'Escape' && document.body.contains(host)) {
+        document.removeEventListener('keydown', handler);
+        close();
+      }
+    });
+
+    function shiftMonth(delta) {
+      var year = Number(state.year || (state.years[state.years.length - 1] || 2017));
+      var month = Number(state.month || 1) + delta;
+      while (month < 1) { month += 12; year -= 1; }
+      while (month > 12) { month -= 12; year += 1; }
+      state.year = String(year);
+      state.month = String(month);
+      state.day = '';
+      renderCalendar();
+      renderList();
+    }
+
+    function renderCalendar() {
+      var rangeEl = host.querySelector('[data-tl-range]');
+      if (rangeEl && state.years.length) {
+        rangeEl.textContent = state.years[0] + ' — ' + state.years[state.years.length - 1];
+      }
+      host.querySelector('[data-tl-ym]').textContent =
+        state.year ? (state.year + ' 年' + (state.month ? ' ' + state.month + ' 月' : '')) : '全部年份';
+      var yearsHtml = state.years.map(function (value) {
+        return '<button class="tlCell' + (String(value) === String(state.year) ? ' on' : '')
+          + '" data-tl-year="' + esc(value) + '">' + esc(value) + '</button>';
+      }).join('');
+      host.querySelector('[data-tl-years]').innerHTML = yearsHtml;
+      var monthsHtml = '';
+      for (var month = 1; month <= 12; month += 1) {
+        monthsHtml += '<button class="tlCell' + (String(month) === String(state.month) ? ' on' : '')
+          + '" data-tl-month="' + month + '">' + month + '</button>';
+      }
+      host.querySelector('[data-tl-months]').innerHTML = monthsHtml;
+
+      var daysHtml = '';
+      if (state.year && state.month) {
+        var year = Number(state.year), mon = Number(state.month);
+        var first = new Date(year, mon - 1, 1).getDay();
+        var lead = (first + 6) % 7;                       // 周一为第一列
+        var total = tlDaysInMonth(year, mon);
+        for (var blank = 0; blank < lead; blank += 1) { daysHtml += '<span class="tlBlank"></span>'; }
+        for (var day = 1; day <= total; day += 1) {
+          var has = tlDayHasActivity(state, year, mon, day);
+          daysHtml += '<button class="tlDay' + (has ? ' has' : '')
+            + (String(day) === String(state.day) ? ' on' : '')
+            + '" data-tl-day="' + day + '">' + day + '</button>';
+        }
+      } else {
+        daysHtml = '<span class="tlBlankWide">选择年份与月份查看日历</span>';
+      }
+      host.querySelector('[data-tl-days]').innerHTML = daysHtml;
+
+      host.querySelectorAll('[data-tl-year]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          state.year = button.getAttribute('data-tl-year');
+          state.day = '';
+          renderCalendar();
+          renderList();
+        });
+      });
+      host.querySelectorAll('[data-tl-month]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          state.month = button.getAttribute('data-tl-month');
+          state.day = '';
+          renderCalendar();
+          renderList();
+        });
+      });
+      host.querySelectorAll('[data-tl-day]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          state.day = button.getAttribute('data-tl-day');
+          renderCalendar();
+          renderList();
+        });
+      });
+      host.querySelector('[data-tl-picked]').textContent = state.year
+        ? (state.year + '/' + (state.month ? tlPad(Number(state.month)) : '')
+           + (state.day ? '/' + tlPad(Number(state.day)) : ''))
+        : '全部时间';
+    }
+
+    function activeRows() {
+      var needle = state.query.trim().toLowerCase();
+      var stamp = (state.year && state.month && state.day)
+        ? (state.year + '/' + tlPad(Number(state.month)) + '/' + tlPad(Number(state.day))) : '';
+      return (state.rows || []).filter(function (row) {
+        if (state.family && row.familyKey !== state.family) { return false; }
+        if (state.year && String(row.start).slice(0, 4) !== String(state.year)
+            && String(row.end || '').slice(0, 4) !== String(state.year)) { return false; }
+        if (state.year && state.month) {
+          var prefix = state.year + '/' + tlPad(Number(state.month));
+          if (!(String(row.start) <= prefix + '/31' && String(row.end || row.start) >= prefix + '/01')) {
+            return false;
+          }
+        }
+        if (stamp) {
+          if (!(row.start <= stamp && (row.end || row.start) >= stamp)) { return false; }
+        }
+        if (!needle) { return true; }
+        if (String(row.activityId || '').indexOf(needle) >= 0) { return true; }
+        if (String(row.label || '').toLowerCase().indexOf(needle) >= 0) { return true; }
+        return (row.items || []).some(function (code) {
+          return code.toLowerCase().indexOf(needle) >= 0
+            || String(state.names[code] || '').toLowerCase().indexOf(needle) >= 0;
+        });
+      });
+    }
+
+    function renderList() {
+      var rows = activeRows();
+      var countEl = host.querySelector('[data-tl-count]');
+      if (countEl) {
+        countEl.textContent = rows.length + ' 个活动 · 共 '
+          + rows.reduce(function (sum, row) { return sum + row.itemCount; }, 0) + ' 种道具';
+      }
+      var list = host.querySelector('[data-tl-list]');
+      if (!rows.length) {
+        list.innerHTML = '<div class="empty">这个时间范围没有对应活动</div>';
+        return;
+      }
+      var html = '';
+      rows.forEach(function (row) {
+        var label = row.label || (itemFamilyLabel(row.familyKey) + ' ' + row.activityId);
+        html += '<button class="tlRow' + (state.selected === row.key ? ' active' : '')
+          + '" data-tl-row="' + esc(row.key) + '">'
+          + '<span class="tlHead"><b>' + esc(label) + '</b>'
+          + '<span class="tlGo">' + (state.onPick ? '选择' : '查看') + '</span></span>'
+          + '<span class="tlMeta"><span class="tlDate">' + esc(row.start)
+          + (row.end && row.end !== row.start ? ' → ' + esc(row.end) : '') + '</span>'
+          + '<span>' + esc(itemFamilyLabel(row.familyKey))
+          + (row.activityId ? ' · #' + esc(row.activityId) : '')
+          + ' · ' + row.itemCount + ' 种道具'
+          + (row.shops.length ? ' · 商店 ' + row.shops.length : '')
+          + '</span></span></button>';
+      });
+      list.innerHTML = html;
+      list.querySelectorAll('[data-tl-row]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          var key = button.getAttribute('data-tl-row');
+          state.selected = key;
+          var row = (state.rows || []).filter(function (item) { return item.key === key; })[0];
+          if (state.onPick && row) {
+            close();
+            state.onPick(row, state.names);
+            return;
+          }
+          renderList();
+          showDetail(key);
+        });
+      });
+    }
+
+    function showDetail(key) {
+      var row = (state.rows || []).filter(function (item) { return item.key === key; })[0];
+      if (!row) { return; }
+      var label = row.label || (itemFamilyLabel(row.familyKey) + ' ' + row.activityId);
+      var html = '<div class="tlDetail"><div class="tlDetailHead"><b>' + esc(label) + '</b>'
+        + '<span class="small">' + esc(row.start) + ' → ' + esc(row.end || '')
+        + ' · ' + row.items.length + ' 种道具</span></div><div class="grid">';
+      row.items.forEach(function (code) {
+        html += '<div class="tile">'
+          + thumb('/assets/items/' + code.toLowerCase() + '.png', code, 'icon')
+          + '<div class="name">' + esc(state.names[code] || code) + '</div>'
+          + '<div class="id">' + esc(code) + '</div></div>';
+      });
+      html += '</div>';
+      if (row.shops.length) {
+        html += '<div class="small">相关商店 ID：' + esc(row.shops.join(', ')) + '</div>';
+      }
+      html += '<div class="toolbar"><button class="mini" data-tl-back>返回列表</button></div></div>';
+      var list = host.querySelector('[data-tl-list]');
+      list.innerHTML = html;
+      list.querySelector('[data-tl-back]').addEventListener('click', function () {
+        state.selected = null;
+        renderList();
+      });
+    }
+
+    host.querySelector('[data-tl-prev]').addEventListener('click', function () { shiftMonth(-1); });
+    host.querySelector('[data-tl-next]').addEventListener('click', function () { shiftMonth(1); });
+    host.querySelector('[data-tl-allyears]').addEventListener('click', function () {
+      state.year = ''; state.month = ''; state.day = '';
+      renderCalendar();
+      renderList();
+    });
+    host.querySelector('[data-tl-allmonths]').addEventListener('click', function () {
+      state.month = ''; state.day = '';
+      renderCalendar();
+      renderList();
+    });
+    var search = host.querySelector('[data-tl-search]');
+    search.addEventListener('input', function () {
+      state.query = search.value;
+      renderList();
+    });
+    var familySelect = host.querySelector('[data-tl-family]');
+    familySelect.addEventListener('change', function () {
+      state.family = familySelect.value;
+      renderList();
+    });
+
+    api('/api/view/items-timelines?scope=all').then(function (data) {
+      state.rows = data.rows || [];
+      state.names = data.names || {};
+      state.years = data.years || [];
+      state.families = data.families || [];
+      (data.families || []).forEach(function (value) {
+        var option = document.createElement('option');
+        option.value = value;
+        option.textContent = itemFamilyLabel(value);
+        familySelect.appendChild(option);
+      });
+      if (!state.year && state.years.length) {
+        state.year = state.years[state.years.length - 1];
+        state.month = '';
+      }
+      renderCalendar();
+      renderList();
+    }).catch(function (error) {
+      host.querySelector('[data-tl-list]').innerHTML =
+        '<div class="empty">加载失败：' + esc(error.message) + '</div>';
+    });
+  }
+
+  // 从 URL 直接进入某个活动时，按 key 取回该活动的道具清单
+  function hydrateTimelineItem(nav) {
+    var scope = nav.scope || 'player';
+    return paintCurrent(api('/api/view/items-timelines?scope=' + scope), function (data) {
+      var row = (data.rows || []).filter(function (item) { return item.key === nav.timelineKey; })[0];
+      if (!row) {
+        $('main').innerHTML = '<div class="empty">这个时间线没有可显示的道具</div>';
+        return;
+      }
+      S.itemsNav = { family: null, group: null, scope: scope, itemMode: 'timeline',
+        timelineKey: row.key, timelineItems: row.items, timelineNames: data.names || {},
+        timelineLabel: row.label || row.key };
+      render();
+    });
+  }
+
+  function renderTimelineItems() {
+    var nav = S.itemsNav || {};
+    if (!nav.timelineItems && nav.timelineKey) { return hydrateTimelineItem(nav); }
+    var codes = nav.timelineItems || [];
+    var page = pageOf('items');
+    var scope = nav.scope || 'player';
+    var limit = 200;
+    var url = '/api/view/items?scope=' + scope
+      + '&codes=' + encodeURIComponent(codes.join(','))
+      + '&q=' + encodeURIComponent(page.q || '')
+      + '&offset=0&limit=500&sort=' + (page.sort || 'id');
+    return paintCurrent(api(url), function (data) {
+      var rows = data.rows || [];
+      var html = itemActionBar(scope, 'timeline') + timelineSubBar(scope)
+        + '<div class="toolbar"><span class="small">' + esc(nav.timelineLabel || nav.timelineKey) + '</span>'
+        + '<input type="text" data-tl-filter placeholder="筛选这个活动的道具" value="'
+        + esc(page.q || '') + '">'
+        + '<select data-sort><option value="qty">按数量</option><option value="name">按名称</option>'
+        + '<option value="id">按 ID</option></select>'
+        + '<span class="spacer"></span><span class="small">' + rows.length + ' 种道具</span></div>';
+      if (!rows.length) {
+        html += '<div class="empty">这个活动下没有匹配的道具</div>';
+      } else {
+        html += '<div class="grid">';
+        rows.forEach(function (row) {
+          html += itemTileWithSource(row);
+        });
+        html += '</div>';
+      }
+      $('main').innerHTML = html;
+      bindCrumb();
+      bindItemActionBar(scope, scope);
+      var filter = $('main').querySelector('[data-tl-filter]');
+      if (filter) {
+        filter.addEventListener('keydown', function (event) {
+          if (event.key !== 'Enter') { return; }
+          S.page.items = { offset: 0, q: filter.value, sort: 'id' };
+          render();
+        });
+      }
+      var sortSelect = $('main').querySelector('[data-sort]');
+      if (sortSelect) {
+        sortSelect.value = page.sort || 'id';
+        sortSelect.addEventListener('change', function () {
+          S.page.items = { offset: 0, q: page.q || '', sort: sortSelect.value };
+          render();
+        });
+      }
+      bindQtyInputs(rows);
+    });
+  }
+
+  // 数量输入框 + 应用按钮（分类页与时间线页共用）
+  function bindQtyInputs(rows) {
+    $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
+      button.addEventListener('click', function () {
+        var tile = button.closest('.tile');
+        var input = tile.querySelector('[data-qty]');
+        var value = readInteger(input);
+        if (value === null) { return; }
+        edit([{ op: 'item.set', itemId: rows[index].itemId, quantity: value }]);
+      });
+    });
+  }
+
+  var PERMANENT_FAMILIES = { 'general': 1 };
+
+  // 来源：有时间线就给活动名 + 起止；没有时间线但属于活动分类，标「活动」而不是「常驻」
+  function itemSourceText(row) {
+    var tl = row.timeline;
+    if (tl && tl.start) {
+      var span = tl.start + (tl.end && tl.end !== tl.start ? ' ~ ' + tl.end : '');
+      return (tl.label || row.groupLabel || '活动') + '　' + span;
+    }
+    if (PERMANENT_FAMILIES[row.familyKey] || !row.activityId) {
+      return '常驻　' + (row.groupLabel || '通用道具');
+    }
+    return (row.groupLabel || '活动道具') + '　（该期时间未收录）';
+  }
+
+  function itemIsPermanent(row) {
+    return !!(PERMANENT_FAMILIES[row.familyKey] || !row.activityId);
+  }
+
+  function itemTileWithSource(row) {
+    var tip = esc(itemSourceText(row));
+    var html = '<div class="tile hasTip" title="' + tip + '">'
+      + thumb(row.icon, row.name, 'icon')
+      + '<div class="name">' + esc(row.name) + '</div>'
+      + '<div class="id">' + esc(row.itemId) + (row.type ? ' · ' + esc(row.type) : '') + '</div>'
+      + '<div class="tags">'
+      + (row.owned ? '<span class="tag ok">已拥有</span>' : '<span class="tag">未拥有</span>')
+      + '<span class="tag src">' + (itemIsPermanent(row) ? '常驻'
+        : (row.timeline && row.timeline.start ? '限时活动' : '活动道具')) + '</span>'
+      + '</div>'
+      + '<div class="row"><input data-qty type="number" min="0" value="' + esc(row.quantity) + '">'
+      + '<button class="mini" data-save>应用</button></div>'
+      + statLine([['持有', row.quantity], ['累计', row.total]])
+      + '</div>';
+    return html;
+  }
+
+  // 一级：按分类浏览（16 个来源类型）
   function renderItemFamilies() {
     var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
     return paintCurrent(api('/api/view/items-families?scope=' + scope), function (data) {
-      var html = '<div class="toolbar">' + itemCrumb()
+      var html = itemActionBar(scope, 'family')
+        + '<div class="toolbar">' + itemCrumb()
         + '<input type="text" data-global-search placeholder="全局搜索道具（名称 / itemId），回车确认">'
         + '<select data-scope><option value="player">玩家可见道具</option>'
         + '<option value="all">全部（含内部道具）</option></select>'
@@ -739,17 +1307,7 @@
       html += '</div>';
       $('main').innerHTML = html;
       bindCrumb();
-      var globalSearch = $('main').querySelector('[data-global-search]');
-      if (globalSearch) {
-        globalSearch.addEventListener('keydown', function (event) {
-          if (event.key !== 'Enter') { return; }
-          var term = globalSearch.value.trim();
-          if (!term) { return; }
-          S.itemsNav = { family: null, group: null, scope: scope, search: term };
-          S.page.items = { offset: 0, q: term, sort: 'qty' };
-          render();
-        });
-      }
+      bindItemActionBar(scope);
       var scopeSelect = $('main').querySelector('[data-scope]');
       if (scopeSelect) {
         scopeSelect.value = scope;
@@ -759,14 +1317,22 @@
           render();
         });
       }
+      var globalSearch = $('main').querySelector('[data-global-search]');
+      if (globalSearch) {
+        globalSearch.addEventListener('keydown', function (event) {
+          if (event.key !== 'Enter') { return; }
+          var term = globalSearch.value.trim();
+          if (!term) { return; }
+          S.itemsNav = { family: null, group: null, scope: scope, search: term };
+          S.page.items = { offset: 0, q: term, sort: 'id' };
+          render();
+        });
+      }
       $('main').querySelectorAll('[data-family]').forEach(function (tile) {
         tile.addEventListener('click', function () {
-          S.itemsNav = {
-            family: tile.getAttribute('data-family'),
-            familyLabel: tile.querySelector('.name').textContent,
-            group: null,
-            scope: scope
-          };
+          var key = tile.getAttribute('data-family');
+          var picked = data.families.filter(function (item) { return item.key === key; })[0] || {};
+          S.itemsNav = { family: key, familyLabel: picked.label, group: null, scope: scope };
           S.page.items = { offset: 0, q: '', sort: 'id' };
           render();
         });
@@ -774,39 +1340,45 @@
     });
   }
 
+  // 二级：某个分类下的活动组
   function renderItemGroups(family) {
-    var scope = (S.itemsNav && S.itemsNav.scope) || 'player';
+    var nav = S.itemsNav || {};
+    var scope = nav.scope || 'player';
     return paintCurrent(api('/api/view/items-groups?family=' + encodeURIComponent(family)
       + '&scope=' + scope), function (data) {
-      var html = '<div class="toolbar">' + itemCrumb()
+      var html = itemActionBar(scope, 'family')
+        + '<div class="toolbar">' + itemCrumb()
         + '<input type="text" data-filter placeholder="过滤活动名">'
-        + '<span class="spacer"></span><span class="small">' + data.total + ' 组活动</span></div>';
-      html += '<div class="grid wide">';
-      data.groups.forEach(function (group) {
-        html += '<div class="tile cat" data-group="' + esc(group.key) + '" data-label="'
-          + esc(group.label) + '">'
+        + '<span class="spacer"></span><span class="small">' + data.total + ' 组活动</span></div>'
+        + '<div class="grid wide">';
+      (data.groups || []).forEach(function (group) {
+        html += '<div class="tile cat" data-group="' + esc(group.key) + '">'
           + '<div class="name">' + esc(group.label) + '</div>'
-          + statLine([['道具', group.count]])
+          + '<div class="id">' + group.count + ' 种道具</div>'
           + statLine([['已拥有', group.owned]])
           + '</div>';
       });
       html += '</div>';
       $('main').innerHTML = html;
       bindCrumb();
+      bindItemActionBar(scope);
       var filter = $('main').querySelector('[data-filter]');
-      filter.addEventListener('input', function () {
-        var needle = filter.value.trim().toLowerCase();
-        $('main').querySelectorAll('.tile.cat').forEach(function (tile) {
-          var label = (tile.getAttribute('data-label') || '').toLowerCase();
-          tile.style.display = !needle || label.indexOf(needle) >= 0 ? '' : 'none';
+      if (filter) {
+        filter.addEventListener('keydown', function (event) {
+          if (event.key !== 'Enter') { return; }
+          var term = (filter.value || '').trim().toLowerCase();
+          $('main').querySelectorAll('[data-group]').forEach(function (tile) {
+            var name = tile.querySelector('.name').textContent.toLowerCase();
+            tile.style.display = (!term || name.indexOf(term) >= 0) ? '' : 'none';
+          });
         });
-      });
+      }
       $('main').querySelectorAll('[data-group]').forEach(function (tile) {
         tile.addEventListener('click', function () {
-          var nav = S.itemsNav || (S.itemsNav = {});
-          nav.group = tile.getAttribute('data-group');
-          nav.groupLabel = tile.getAttribute('data-label');
-          nav.scope = nav.scope || 'player';
+          var key = tile.getAttribute('data-group');
+          var picked = (data.groups || []).filter(function (item) { return item.key === key; })[0] || {};
+          S.itemsNav = { family: family, familyLabel: nav.familyLabel, group: key,
+            groupLabel: picked.label, scope: scope };
           S.page.items = { offset: 0, q: '', sort: 'id' };
           render();
         });
@@ -826,7 +1398,8 @@
       + '&limit=' + limit + '&sort=' + sort + '&q=' + encodeURIComponent(page.q || '');
     return paintCurrent(api(url), function (data) {
       var owned = data.rows.filter(function (row) { return row.owned; }).length;
-      var html = '<div class="toolbar">' + itemCrumb()
+      var html = itemActionBar((S.itemsNav && S.itemsNav.scope) || 'player', 'family')
+      + '<div class="toolbar">' + itemCrumb()
         + (searching ? '<span class="small">搜索「' + esc(S.itemsNav.search) + '」</span>'
           + '<button class="mini" data-search-clear>返回分类</button>' : '')
         + '<input type="text" data-search placeholder="搜索道具名称或 itemId">'
@@ -836,19 +1409,12 @@
         + ' 种（本页已有 ' + owned + ' 种）</span></div>';
       html += '<div class="grid">';
       data.rows.forEach(function (row) {
-        html += tileHtml(
-          thumb(row.icon, row.name, 'icon'),
-          row.name,
-          row.itemId + (row.type ? ' · ' + row.type : ''),
-          '<div class="row"><input data-qty type="number" min="0" value="' + esc(row.quantity) + '">'
-            + '<button class="mini" data-save>应用</button></div>'
-            + statLine([['累计', row.total]]),
-          (row.owned ? '<span class="tag ok">已拥有</span>' : '<span class="tag">未拥有</span>')
-        );
+        html += itemTileWithSource(row);
       });
       html += '</div>' + pagerHtml(data.total, limit, page);
       $('main').innerHTML = html;
       bindCrumb();
+      bindItemActionBar((S.itemsNav && S.itemsNav.scope) || 'player');
       searchBox(tabId, '搜索道具', render);
       bindPager(tabId, limit, render);
       var clearSearch = $('main').querySelector('[data-search-clear]');
@@ -867,15 +1433,7 @@
         page.offset = 0;
         render();
       });
-      var rows = data.rows;
-      $('main').querySelectorAll('[data-save]').forEach(function (button, index) {
-        button.addEventListener('click', function () {
-          var input = button.closest('.tile').querySelector('[data-qty]');
-          var value = readInteger(input);
-          if (value === null) { return; }
-          edit([{ op: 'item.set', itemId: rows[index].itemId, quantity: value }]);
-        });
-      });
+      bindQtyInputs(data.rows);
     });
   }
 
@@ -1486,16 +2044,37 @@ function renderCharaDetail() {
           + '<div class="id">' + esc(item.desc) + '</div></div>';
       });
       html += '</div>';
-      html += '<section class="panel"><h2>只读数值（游戏推算）</h2><div class="kvList">'
-        + '<div class="kv"><span>HP</span><strong>' + fmt(card.hp) + '</strong></div>'
-        + '<div class="kv"><span>攻击力</span><strong>' + fmt(card.attack) + '</strong></div>'
-        + '<div class="kv"><span>防御力</span><strong>' + fmt(card.defense) + '</strong></div>'
-        + '<div class="kv"><span>属性强化（攻 / 防 / HP）</span><strong>'
-        + fmt(d.charaReadonly.addendAttack) + ' / ' + fmt(d.charaReadonly.addendDefense) + ' / '
-        + fmt(d.charaReadonly.addendHp) + '</strong></div>'
-        + '<div class="kv"><span>Accele / Blast / Charge</span><strong>'
-        + fmt(d.charaReadonly.addendAccelBonus) + ' / ' + fmt(d.charaReadonly.addendBlastBonus) + ' / '
-        + fmt(d.charaReadonly.addendChargeBonus) + '</strong></div></div></section>';
+      var attrBonus = d.charaReadonly.attributeBonus || {};
+      var computed = d.charaReadonly.computedStats || {};
+      function statRow(label, key, computedValue, bonusValue) {
+        return '<div class="kv"><span>' + label + '</span><span class="statEdit">'
+          + '<input data-card-stat="' + key + '" type="number" min="1" value="' + esc(card[key]) + '">'
+          + '<button class="mini" data-stat-save="' + key + '">应用</button>'
+          + (bonusValue
+            ? '<i class="plus" title="属性强化加成">(+' + fmt(bonusValue) + ')</i>' : '')
+          + (computedValue && computedValue !== card[key]
+            ? '<i class="drift" title="按等级推算应为 ' + fmt(computedValue) + '">≠ ' + fmt(computedValue) + '</i>'
+            : '')
+          + '</span></div>';
+      }
+      html += '<section class="panel"><h2>白板数值'
+        + '<span class="spacer"></span><button class="mini" data-stat-restore>一键还原</button></h2>'
+        + '<div class="kvList">'
+        + statRow('HP', 'hp', computed.hp, attrBonus.hp)
+        + statRow('攻击力', 'attack', computed.attack, attrBonus.attack)
+        + statRow('防御力', 'defense', computed.defense, attrBonus.defense)
+        + '<div class="kv"><span>属性强化合计</span><strong>HP ' + fmt(attrBonus.hp || 0)
+        + ' · 攻 ' + fmt(attrBonus.attack || 0) + ' · 防 ' + fmt(attrBonus.defense || 0)
+        + '</strong></div>'
+        + '<div class="kv"><span>精神强化（addend）</span><strong>HP '
+        + fmt(d.charaReadonly.addendHp || 0) + ' · 攻 ' + fmt(d.charaReadonly.addendAttack || 0)
+        + ' · 防 ' + fmt(d.charaReadonly.addendDefense || 0) + '</strong></div>'
+        + '<div class="kv"><span>Accele / Blast / Charge（精神）</span><strong>'
+        + fmt(d.charaReadonly.addendAccelBonus || 0) + ' / ' + fmt(d.charaReadonly.addendBlastBonus || 0)
+        + ' / ' + fmt(d.charaReadonly.addendChargeBonus || 0) + '</strong></div></div>'
+        + '<p class="small">白板可直接改：游戏只校验非负整数，不比对等级推算值。'
+        + '「一键还原」按当前等级与成长曲线重算。<code>(+N)</code> 是属性强化的加成，'
+        + '精神强化写入 <code>addend*</code>，都不影响白板。</p></section>';
     } else {
       html += charaPanelHtml(panel, d, card);
     }
@@ -1516,6 +2095,22 @@ function renderCharaDetail() {
         S.charaPanel = null;
         S.spiritSel = null;
         render();
+      });
+    }
+    // 白板数值：逐项应用 + 一键还原
+    $('main').querySelectorAll('[data-stat-save]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var field = button.getAttribute('data-stat-save');
+        var input = $('main').querySelector('[data-card-stat="' + field + '"]');
+        var value = readInteger(input, 1);
+        if (value === null) { return; }
+        edit([{ op: 'card.set', userCardId: card.id, field: field, value: value }]);
+      });
+    });
+    var restore = $('main').querySelector('[data-stat-restore]');
+    if (restore) {
+      restore.addEventListener('click', function () {
+        edit([{ op: 'card.restoreStats', userCardId: card.id }]);
       });
     }
     $('main').querySelectorAll('[data-panel]').forEach(function (tile) {

@@ -184,10 +184,22 @@ def main():
     # ---- 3. 数值只读 + 按游戏公式推算
     with_card = editor.charas_view(limit=5)["rows"]   # 前面可能换过卡，重新取当前状态
     target = with_card[0]
-    expect_error("直接改卡片攻击被拒绝",
+    # 白板可改：游戏 battle.js 对 card.* 只校验非负整数，不比对等级推算值
+    editor.apply([{"op": "card.set", "id": target["userCardId"], "field": "attack", "value": 12345}])
+    check("白板攻击可直接改",
+          editor.chara_detail(user_card_id=target["userCardId"])["card"]["attack"] == 12345,
+          "attack=%s" % editor.chara_detail(user_card_id=target["userCardId"])["card"]["attack"])
+    expect_error("白板 0 被拒绝",
                  lambda: editor.apply([{"op": "card.set", "id": target["userCardId"],
-                                        "field": "attack", "value": 1}]),
-                 "stat_readonly")
+                                        "field": "attack", "value": 0}]),
+                 "invalid_value")
+    restored = editor.apply([{"op": "card.restoreStats", "userCardId": target["userCardId"]}])
+    expected_restore = growth.card_stats(editor.masters.card(target["cardId"]),
+                                         editor.chara_detail(user_card_id=target["userCardId"])["card"]["level"])
+    check("一键还原回推算值",
+          editor.chara_detail(user_card_id=target["userCardId"])["card"]["attack"] == expected_restore["attack"],
+          "restored=%s expected=%s" % (editor.chara_detail(user_card_id=target["userCardId"])["card"]["attack"],
+                                       expected_restore["attack"]))
     master = editor.masters.card(target["cardId"])
     new_level = min(target["maxLevel"], (target["level"] or 1) + 5)
     editor.apply([{"op": "card.set", "id": target["userCardId"], "field": "level", "value": new_level}])

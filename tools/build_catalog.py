@@ -37,13 +37,14 @@ def load_json(path, default=None):
 def load_master_tables(full_catalog_path):
     """读 MCATBIN1 的 tables.chara / tables.card，用来补 libs 缺的字段。"""
     if not full_catalog_path or not os.path.isfile(full_catalog_path):
-        return {}, {}
+        return {}, {}, {}
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from parse_compact_catalog import CompactCatalog
     with open(full_catalog_path, "rb") as handle:
         root = CompactCatalog(handle.read()).root_value()
     tables = root.get("tables") or {}
-    return tables.get("chara") or {}, tables.get("card") or {}, tables.get("piece") or {}
+    return (tables.get("chara") or {}, tables.get("card") or {},
+            tables.get("piece") or {}, tables.get("item") or {})
 
 
 def build(libs_dir, full_catalog_path=None):
@@ -85,7 +86,20 @@ def build(libs_dir, full_catalog_path=None):
             if row.get(key):
                 entry[out] = row[key]
         catalog["items"][code] = entry
-    master_chara, master_cards, master_pieces = load_master_tables(full_catalog_path)
+    master_chara, master_cards, master_pieces, master_items = load_master_tables(full_catalog_path)
+    # MCATBIN1 里还有 libs 未收录的道具（早期活动交换品），一并补上
+    for code, row in master_items.items():
+        if not isinstance(row, dict) or code in catalog["items"]:
+            continue
+        if not row.get("name"):
+            continue
+        entry = {"name": row["name"]}
+        for key, out in (("description", "desc"), ("unit", "unit"), ("itemType", "type")):
+            if row.get(key):
+                entry[out] = row[key]
+        entry["source"] = "mcatbin1"
+        catalog["items"][code] = entry
+
     # 卡片上的属性作为第二保险：同一角色的卡属性一致
     card_attribute = {}
     for row in master_cards.values():
